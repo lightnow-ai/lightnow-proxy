@@ -264,7 +264,7 @@ async def status(_request: Request, config: ProxyConfig) -> Response:
             "mode": mode,
             "runner": {
                 "name": config.local_proxy.runner_name,
-                "version": config.local_proxy.runner_version,
+                "version": __version__,
             },
             "local_proxy": {
                 "enabled": config.local_proxy.enabled,
@@ -311,7 +311,9 @@ def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: 
 
     async def status_endpoint(request: Request) -> Response:
         if request.query_params.get("check") == "upstreams":
-            return JSONResponse(await build_health_report(config))
+            report = await build_health_report(config, router=router)
+            await router.emit_health_event(report)
+            return JSONResponse(report)
         return await status(request, config)
 
     routes = [

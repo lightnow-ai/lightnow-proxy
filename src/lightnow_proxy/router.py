@@ -13,6 +13,7 @@ from urllib.parse import quote, unquote
 
 from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemplate, TextContent, Tool
 
+from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.registry import RegistryApiClient
 from lightnow_proxy.request_context import get_current_principal
@@ -564,7 +565,7 @@ class ToolRouter:
                 "mcp_client_name": client_name,
                 "mcp_client_version": client_version,
                 "runner_name": self.config.local_proxy.runner_name,
-                "runner_version": self.config.local_proxy.runner_version,
+                "runner_version": __version__,
                 "client_transport": self.config.local_proxy.client_transport,
                 "local_proxy_policy_mode": self.config.local_proxy.policy_mode,
                 "local_proxy_allow_unmanaged_client_servers": self.config.local_proxy.allow_unmanaged_client_servers,
@@ -583,6 +584,22 @@ class ToolRouter:
                 "profile": self.config.local_proxy.profile,
                 "event_type": event_type,
                 "status": status,
+            }
+        )
+
+    async def emit_health_event(self, report: dict[str, Any]) -> None:
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        health_status = report.get("status") if isinstance(report.get("status"), str) else "failed"
+        await self._emit_runtime_event(
+            {
+                "profile": self.config.local_proxy.profile,
+                "event_type": "proxy_health",
+                "status": "success" if health_status == "healthy" else "error",
+                "proxy_health_status": health_status if health_status in {"healthy", "degraded", "failed"} else "failed",
+                "proxy_upstreams": int(summary.get("upstreams") or 0),
+                "proxy_healthy_upstreams": int(summary.get("healthy_upstreams") or 0),
+                "proxy_failed_upstreams": int(summary.get("failed_upstreams") or 0),
+                "proxy_tool_count": int(summary.get("tools") or 0),
             }
         )
 

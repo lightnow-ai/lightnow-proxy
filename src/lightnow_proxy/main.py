@@ -62,7 +62,7 @@ def main() -> None:
     except FileNotFoundError:
         parser.error(f"config file not found: {config_path} (set --config or LIGHTNOW_PROXY_CONFIG)")
     if args.health:
-        report = anyio.run(build_health_report, config)
+        report = anyio.run(build_and_emit_health_report, config)
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=True))
         else:
@@ -77,6 +77,13 @@ def main() -> None:
 
     app = create_app(config)
     uvicorn.run(app, host=config.server.host, port=config.server.port)
+
+
+async def build_and_emit_health_report(config: ProxyConfig) -> dict:
+    router = ToolRouter(config)
+    report = await build_health_report(config, router=router)
+    await router.emit_health_event(report)
+    return report
 
 
 async def warm_tools_cache(config: ProxyConfig) -> None:

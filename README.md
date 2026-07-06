@@ -80,6 +80,11 @@ lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
 lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
 ```
 
+When telemetry is enabled, active health checks are also sent to LightNow
+Insights as metadata-only proxy health events. The Insights page can then show
+which clients and profiles are healthy, degraded, or failing without storing
+secrets, tool arguments, or response bodies.
+
 ## More Documentation
 
 Detailed setup guides, examples, diagrams, supported client paths, telemetry

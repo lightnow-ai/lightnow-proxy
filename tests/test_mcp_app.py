@@ -80,6 +80,14 @@ class FakeRegistryClient:
         )
 
 
+class FakeRuntimeEventRegistry:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def post_runtime_event(self, payload: dict[str, Any]) -> None:
+        self.events.append(payload)
+
+
 @pytest.mark.asyncio
 async def test_status_endpoint_reports_static_runtime_state() -> None:
     config = build_config()
@@ -111,6 +119,53 @@ async def test_status_endpoint_can_run_active_upstream_check() -> None:
     assert payload["status"] == "degraded"
     assert payload["profiles"][0]["name"] == "default"
     assert payload["profiles"][0]["warning"] == "profile has no upstream MCP servers"
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_emits_proxy_health_event_for_active_checks() -> None:
+    config = ProxyConfig(
+        server=ServerConfig(),
+        local_proxy={
+            "enabled": True,
+            "profile": "default",
+            "client_name": "codex",
+            "client_transport": "stdio",
+            "policy_mode": "enforce",
+            "allow_unmanaged_client_servers": False,
+        },
+        auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+        registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
+        profiles={"default": ProfileConfig()},
+        upstreams={},
+    )
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config)
+    registry = FakeRuntimeEventRegistry()
+    router.registry_client = registry
+    app = create_app(config, router=router)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as client:
+        response = await client.get("/status?check=upstreams")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert len(registry.events) == 1
+    event = registry.events[0]
+    assert event["event_type"] == "proxy_health"
+    assert event["status"] == "error"
+    assert event["profile"] == "default"
+    assert event["mcp_client_name"] == "codex"
+    assert event["runner_name"] == "lightnow-local-proxy"
+    assert event["runner_version"] == __version__
+    assert event["proxy_health_status"] == "degraded"
+    assert event["proxy_upstreams"] == 0
+    assert event["proxy_healthy_upstreams"] == 0
+    assert event["proxy_failed_upstreams"] == 0
+    assert event["proxy_tool_count"] == 0
+    assert event["local_proxy_policy_mode"] == "enforce"
+    assert event["local_proxy_allow_unmanaged_client_servers"] is False
 
 
 @pytest.mark.asyncio
@@ -181,6 +236,42 @@ async def test_health_reports_profile_upstream_status_without_secrets() -> None:
     assert all(upstream["status"] == "healthy" for upstream in payload["profiles"][0]["upstreams"])
     assert "token" not in str(payload).lower()
     assert "secret" not in str(payload).lower()
+
+
+@pytest.mark.asyncio
+async def test_proxy_health_event_summarizes_active_upstream_report() -> None:
+    from lightnow_proxy.router import ToolRouter
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    config.local_proxy.client_name = "codex"
+    config.local_proxy.client_transport = "stdio"
+    config.local_proxy.policy_mode = "enforce"
+    config.local_proxy.allow_unmanaged_client_servers = False
+    config.registry_api = RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test")
+    router = ToolRouter(config, upstream_client=FakeUpstreamClient())
+    registry = FakeRuntimeEventRegistry()
+    router.registry_client = registry
+
+    report = await build_health_report(config, router)
+    await router.emit_health_event(report)
+
+    assert len(registry.events) == 1
+    event = registry.events[0]
+    assert event["event_type"] == "proxy_health"
+    assert event["status"] == "success"
+    assert event["profile"] == "admins"
+    assert event["mcp_client_name"] == "codex"
+    assert event["client_transport"] == "stdio"
+    assert event["runner_version"] == __version__
+    assert event["proxy_health_status"] == "healthy"
+    assert event["proxy_upstreams"] == 2
+    assert event["proxy_healthy_upstreams"] == 2
+    assert event["proxy_failed_upstreams"] == 0
+    assert event["proxy_tool_count"] == 2
+    assert event["local_proxy_policy_mode"] == "enforce"
+    assert event["local_proxy_allow_unmanaged_client_servers"] is False
 
 
 @pytest.mark.asyncio
