@@ -51,3 +51,22 @@ upstreams: {}
     assert result.returncode == 2
     assert '"status": "degraded"' in result.stdout
     assert '"warning": "profile has no upstream MCP servers"' in result.stdout
+
+
+def test_missing_config_file_prints_error_instead_of_traceback(tmp_path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lightnow_proxy.main",
+            "--config",
+            str(tmp_path / "does-not-exist.yaml"),
+            "--health",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "config file not found" in result.stderr
+    assert "Traceback" not in result.stderr

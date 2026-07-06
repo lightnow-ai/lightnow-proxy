@@ -139,7 +139,6 @@ def normalize_groups(raw_groups: Any) -> set[str]:
             continue
         groups.add(normalized)
         groups.add(normalized.strip("/"))
-        groups.add(normalized.rsplit("/", 1)[-1])
     return groups
 
 
@@ -156,5 +155,5 @@ def has_required_group(principal: Principal, required_groups: list[str]) -> bool
         return True
     if not required_groups:
         return True
-    wanted = {group.strip("/").rsplit("/", 1)[-1] for group in required_groups}
+    wanted = {group.strip("/") for group in required_groups}
     return bool(principal.groups.intersection(wanted))

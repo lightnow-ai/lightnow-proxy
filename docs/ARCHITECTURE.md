@@ -52,6 +52,12 @@ profiles:
       - math
 ```
 
+The local MCP endpoint is unauthenticated because desktop MCP clients start it
+as a local process. It therefore validates MCP HTTP `Host` and `Origin` headers
+and allows only loopback browser origins. A non-loopback `server.public_url` is
+ignored for Local Proxy browser-origin allowlisting; Local Proxy mode is not a
+remote hosted endpoint.
+
 ## Upstream Transports
 
 The Local Proxy can route to both currently relevant MCP transport classes:
@@ -141,3 +147,13 @@ down" from "one configured server is unhealthy".
 The repository previously exposed one remote MCP endpoint per profile with
 Keycloak bearer-token checks. That shape remains available only when
 `local_proxy.enabled` is false.
+
+Profile endpoints also validate MCP HTTP `Host` and `Origin` headers. Unlike
+Local Proxy mode, they may allow the configured `server.public_url` host because
+they require bearer-token authentication before routing MCP requests.
+
+`profiles.*.required_groups` match Keycloak group paths after trimming leading
+and trailing slashes. Top-level paths such as `/lightnow-proxy-admins` therefore
+match `lightnow-proxy-admins`, but nested groups are not reduced to their final
+path segment. For example, `/team-a/admin` does not grant access to a profile
+requiring `/team-b/admin` or plain `admin`.

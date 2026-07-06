@@ -10,7 +10,6 @@ local_proxy:
   client_name: "codex"
   client_version: null
   runner_name: "lightnow-local-proxy"
-  runner_version: "1.0.0"
   client_transport: "stdio"
 
 auth:

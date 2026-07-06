@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack, asynccontextmanager
+from ipaddress import ip_address
 import logging
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp import types
 from mcp.types import CallToolResult, ReadResourceResult, TextContent
 from starlette.applications import Starlette
@@ -43,6 +46,7 @@ class ProfileMCPApp:
             app=self.server,
             json_response=False,
             stateless=True,
+            security_settings=transport_security_settings(config, local_only=False),
         )
 
     def _build_server(self) -> Server:
@@ -124,6 +128,7 @@ class LocalProxyMCPApp:
             app=self.server,
             json_response=False,
             stateless=True,
+            security_settings=transport_security_settings(config, local_only=True),
         )
 
     def _build_server(self) -> Server:
@@ -161,6 +166,79 @@ class LocalProxyMCPApp:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         await self.session_manager.handle_request(scope, receive, send)
+
+
+def transport_security_settings(config: ProxyConfig, *, local_only: bool) -> TransportSecuritySettings:
+    """Build MCP HTTP transport security settings.
+
+    MCP Streamable HTTP servers must validate Host and Origin headers. Local
+    Proxy mode is unauthenticated and must remain loopback-only; profile proxy
+    mode may be deployed behind a configured public URL and still uses bearer
+    auth before dispatching MCP requests.
+    """
+    hosts = loopback_allowed_hosts()
+    origins = loopback_allowed_origins()
+    add_allowed_host(hosts, config.server.host, require_loopback=local_only)
+
+    public = urlparse(config.server.public_url)
+    if public.hostname:
+        add_allowed_host(hosts, public.netloc, require_loopback=local_only)
+        add_allowed_host(hosts, public.hostname, require_loopback=local_only)
+        if public.scheme in {"http", "https"} and (not local_only or is_loopback_host(public.hostname)):
+            origins.add(f"{public.scheme}://{public.netloc}")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=sorted(hosts),
+        allowed_origins=sorted(origins),
+    )
+
+
+def loopback_allowed_hosts() -> set[str]:
+    return {"127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*"}
+
+
+def loopback_allowed_origins() -> set[str]:
+    return {
+        f"{scheme}://{host}"
+        for scheme in ("http", "https")
+        for host in ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*")
+    }
+
+
+def add_allowed_host(hosts: set[str], host: str, *, require_loopback: bool) -> None:
+    normalized = normalize_allowed_host(host)
+    if normalized is None:
+        return
+    if require_loopback and not is_loopback_host(normalized):
+        return
+    hosts.add(normalized)
+    hosts.add(f"{normalized}:*")
+
+
+def normalize_allowed_host(host: str) -> str | None:
+    if not host:
+        return None
+    raw_host = host.rsplit("@", 1)[-1].strip()
+    if not raw_host:
+        return None
+    parsed = urlparse(f"//{raw_host}")
+    hostname = parsed.hostname or raw_host
+    if ":" in hostname and not hostname.startswith("["):
+        return f"[{hostname}]"
+    return hostname
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = normalize_allowed_host(host)
+    if normalized is None:
+        return False
+    if normalized == "localhost":
+        return True
+    candidate = normalized.strip("[]")
+    try:
+        return ip_address(candidate).is_loopback
+    except ValueError:
+        return False
 
 
 async def unauthorized(scope: Scope, receive: Receive, send: Send, detail: str) -> None:

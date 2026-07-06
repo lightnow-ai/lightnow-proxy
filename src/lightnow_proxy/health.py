@@ -9,7 +9,7 @@ from typing import Any
 
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProxyConfig
-from lightnow_proxy.router import ToolRouter
+from lightnow_proxy.router import ToolRouter, error_message, error_type_name
 from lightnow_proxy.upstream import UpstreamMCPClient
 
 
@@ -33,8 +33,8 @@ async def build_health_report(config: ProxyConfig, router: ToolRouter | None = N
             profile_payload.update(
                 {
                     "status": "failed",
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc)[:500],
+                    "error_type": error_type_name(exc),
+                    "error_message": error_message(exc),
                 }
             )
             profiles.append(profile_payload)

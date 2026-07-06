@@ -28,8 +28,6 @@ def test_normalize_groups_supports_keycloak_paths() -> None:
         "/lightnow-proxy-admins",
         "lightnow-proxy-admins",
         "tenant/users",
-        "tenant/users",
-        "users",
     }
 
 
@@ -37,6 +35,13 @@ def test_required_group_accepts_leaf_group_name() -> None:
     principal = Principal("sub", "nils.friedrichs", {"/lightnow-proxy-admins", "lightnow-proxy-admins"}, {})
     assert has_required_group(principal, ["lightnow-proxy-admins"])
     assert not has_required_group(principal, ["lightnow-proxy-users"])
+
+
+def test_required_group_does_not_match_nested_group_leaf_name() -> None:
+    principal = Principal("sub", "nils.friedrichs", {"tenant-a/admin", "/tenant-a/admin"}, {})
+    assert has_required_group(principal, ["/tenant-a/admin"])
+    assert not has_required_group(principal, ["tenant-b/admin"])
+    assert not has_required_group(principal, ["admin"])
 
 
 def test_configured_audiences_normalizes_string_and_list() -> None:

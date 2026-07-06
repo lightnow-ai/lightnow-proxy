@@ -57,7 +57,10 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = args.config
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        parser.error(f"config file not found: {config_path} (set --config or LIGHTNOW_PROXY_CONFIG)")
     if args.health:
         report = anyio.run(build_health_report, config)
         if args.json:

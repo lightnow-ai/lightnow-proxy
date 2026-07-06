@@ -85,7 +85,7 @@ async def test_status_endpoint_reports_static_runtime_state() -> None:
     config = build_config()
     app = create_app(config)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as client:
         response = await client.get("/status")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
@@ -103,7 +103,7 @@ async def test_status_endpoint_can_run_active_upstream_check() -> None:
     app = create_app(config)
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as client:
         response = await client.get("/status?check=upstreams")
 
     assert response.status_code == 200
@@ -130,7 +130,7 @@ async def test_status_reports_non_secret_local_proxy_runtime_state() -> None:
     app = create_app(config)
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as client:
         response = await client.get("/status")
 
     assert response.status_code == 200
@@ -200,6 +200,32 @@ async def test_health_reports_degraded_when_an_upstream_fails() -> None:
     assert upstreams["grafana"]["status"] == "error"
     assert upstreams["grafana"]["error_type"] == "TimeoutError"
     assert upstreams["nextcloud"]["status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_health_unwraps_exception_groups_to_actual_cause() -> None:
+    from lightnow_proxy.router import ToolRouter
+
+    class GroupFailingUpstreamClient(FakeUpstreamClient):
+        async def list_tools(self, config: UpstreamConfig) -> list[Tool]:
+            host = str(config.url.host) if config.url is not None else str(config.command)
+            if "grafana" in host:
+                raise ExceptionGroup(
+                    "unhandled errors in a TaskGroup",
+                    [ExceptionGroup("nested", [ConnectionError("connection refused")])],
+                )
+            return await super().list_tools(config)
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    router = ToolRouter(config, upstream_client=GroupFailingUpstreamClient())
+
+    payload = await build_health_report(config, router)
+    upstreams = {upstream["name"]: upstream for upstream in payload["profiles"][0]["upstreams"]}
+    assert upstreams["grafana"]["status"] == "error"
+    assert upstreams["grafana"]["error_type"] == "ConnectionError"
+    assert upstreams["grafana"]["error_message"] == "connection refused"
 
 
 @pytest.mark.asyncio
@@ -297,10 +323,10 @@ async def test_mcp_profile_lists_and_calls_prefixed_tools() -> None:
     app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
             http_client.headers["Authorization"] = "Bearer admin-token"
             async with streamable_http_client(
-                "http://testserver/profiles/admins/mcp",
+                "http://localhost:8080/profiles/admins/mcp",
                 http_client=http_client,
             ) as (read_stream, write_stream, _session_id):
                 session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
@@ -321,7 +347,7 @@ async def test_mcp_profile_enforces_groups() -> None:
     app = create_app(config)
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
             http_client.headers["Authorization"] = "Bearer user-token"
             response = await http_client.post(
                 "/profiles/admins/mcp",
@@ -351,10 +377,10 @@ async def test_mcp_profile_resolves_runtime_upstreams_with_principal() -> None:
     transport = httpx.ASGITransport(app=app)
 
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
             http_client.headers["Authorization"] = "Bearer admin-token"
             async with streamable_http_client(
-                "http://testserver/profiles/admins/mcp",
+                "http://localhost:8080/profiles/admins/mcp",
                 http_client=http_client,
             ) as (read_stream, write_stream, _session_id):
                 session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
@@ -378,9 +404,9 @@ async def test_local_proxy_endpoint_lists_and_calls_selected_profile_tools() -> 
     app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
             async with streamable_http_client(
-                "http://testserver/mcp",
+                "http://127.0.0.1:8080/mcp",
                 http_client=http_client,
             ) as (read_stream, write_stream, _session_id):
                 session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
@@ -393,6 +419,117 @@ async def test_local_proxy_endpoint_lists_and_calls_selected_profile_tools() -> 
                     result = await session.call_tool("nextcloud__search_files", arguments={"query": "m2"})
                     assert result.isError is False
                     assert "nextcloud.example.test:search_files" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_endpoint_rejects_non_local_host_and_origin() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+
+    from lightnow_proxy.router import ToolRouter
+
+    app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
+    transport = httpx.ASGITransport(app=app)
+    initialize_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0.1.0"},
+        },
+    }
+    headers = {"Accept": "application/json, text/event-stream"}
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://evil.example.test") as http_client:
+            response = await http_client.post("/mcp", json=initialize_payload, headers=headers)
+            assert response.status_code == 421
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
+            response = await http_client.post(
+                "/mcp",
+                json=initialize_payload,
+                headers={**headers, "Origin": "http://evil.example.test"},
+            )
+            assert response.status_code == 403
+
+            response = await http_client.post(
+                "/mcp",
+                json=initialize_payload,
+                headers={**headers, "Origin": "http://127.0.0.1:8080"},
+            )
+            assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_endpoint_ignores_non_loopback_public_url_for_browser_origins() -> None:
+    config = build_config()
+    config.server.public_url = "https://proxy.example.test"
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+
+    from lightnow_proxy.router import ToolRouter
+
+    app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
+    transport = httpx.ASGITransport(app=app)
+    initialize_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0.1.0"},
+        },
+    }
+    headers = {"Accept": "application/json, text/event-stream"}
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="https://proxy.example.test") as http_client:
+            response = await http_client.post(
+                "/mcp",
+                json=initialize_payload,
+                headers={**headers, "Origin": "https://proxy.example.test"},
+            )
+            assert response.status_code == 421
+
+
+@pytest.mark.asyncio
+async def test_profile_proxy_endpoint_allows_configured_public_url_with_bearer_auth() -> None:
+    config = build_config()
+    config.server.public_url = "https://proxy.example.test"
+
+    from lightnow_proxy.router import ToolRouter
+
+    app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
+    transport = httpx.ASGITransport(app=app)
+    initialize_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0.1.0"},
+        },
+    }
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Authorization": "Bearer admin-token",
+        "Origin": "https://proxy.example.test",
+    }
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="https://proxy.example.test") as http_client:
+            response = await http_client.post("/profiles/admins/mcp", json=initialize_payload, headers=headers)
+            assert response.status_code == 200
+
+            response = await http_client.post(
+                "/profiles/admins/mcp",
+                json=initialize_payload,
+                headers={**headers, "Origin": "https://evil.example.test"},
+            )
+            assert response.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -430,9 +567,9 @@ async def test_local_proxy_call_tool_does_not_force_tool_listing() -> None:
     app = create_app(config, router=CallOnlyRouter())
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
             async with streamable_http_client(
-                "http://testserver/mcp",
+                "http://127.0.0.1:8080/mcp",
                 http_client=http_client,
             ) as (read_stream, write_stream, _session_id):
                 session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
@@ -561,12 +698,12 @@ if __name__ == "__main__":
         transport = httpx.ASGITransport(app=local_app)
 
         async with local_app.router.lifespan_context(local_app):
-            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
                 profile_response = await http_client.get("/profiles/default/mcp")
                 assert profile_response.status_code == 404
 
                 async with streamable_http_client(
-                    "http://testserver/mcp",
+                    "http://127.0.0.1:8080/mcp",
                     http_client=http_client,
                 ) as (read_stream, write_stream, _session_id):
                     session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=10))

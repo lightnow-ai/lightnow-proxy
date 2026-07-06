@@ -29,8 +29,9 @@ Before publishing a release:
    ```bash
    make lint
    make test
-   python -m build
-   python -m twine check dist/*
+   rm -rf dist
+   uv run --with build --with twine python -m build
+   uv run --with twine python -m twine check dist/*
    ```
 3. Verify the GitHub Actions `CI` workflow is green on `main`.
 4. Configure PyPI Trusted Publishing before the first PyPI release:

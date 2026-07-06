@@ -25,6 +25,23 @@ class ToolRoutingError(Exception):
     pass
 
 
+def unwrap_error(exc: BaseException) -> BaseException:
+    """Return the first leaf exception so reports show the actual cause
+    instead of "ExceptionGroup: unhandled errors in a TaskGroup"."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return exc
+
+
+def error_type_name(exc: BaseException) -> str:
+    return type(unwrap_error(exc)).__name__
+
+
+def error_message(exc: BaseException) -> str:
+    leaf = unwrap_error(exc)
+    return (str(leaf) or type(leaf).__name__)[:500]
+
+
 @dataclass(frozen=True)
 class RoutedTool:
     upstream_name: str
@@ -109,7 +126,7 @@ class ToolRouter:
             for upstream_name, upstream_tools, exc in results:
                 if exc is not None:
                     failures.append((upstream_name, exc))
-                    logger.warning("failed to list tools for upstream %s: %s", upstream_name, exc)
+                    logger.warning("failed to list tools for upstream %s: %s", upstream_name, unwrap_error(exc))
                     continue
                 for tool in upstream_tools:
                     tools.append(prefix_tool(upstream_name, tool))
@@ -145,8 +162,8 @@ class ToolRouter:
                     "event_type": "list_tools",
                     "status": "error",
                     "duration_ms": self._duration_ms(started),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc)[:500],
+                    "error_type": error_type_name(exc),
+                    "error_message": error_message(exc),
                 }
             )
             raise
@@ -178,8 +195,8 @@ class ToolRouter:
                 server_name=upstream.server_name,
                 status="error",
                 duration_ms=duration_ms,
-                error_type=type(exc).__name__,
-                error_message=str(exc)[:500],
+                error_type=error_type_name(exc),
+                error_message=error_message(exc),
             )
         return UpstreamHealth(
             name=upstream_name,
@@ -291,8 +308,8 @@ class ToolRouter:
                     "duration_ms": self._duration_ms(started),
                     "request_bytes": tool_arguments_size(arguments),
                     **runtime_request_metadata(arguments, request_meta),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc)[:500],
+                    "error_type": error_type_name(exc),
+                    "error_message": error_message(exc),
                 }
             )
             raise
@@ -308,7 +325,7 @@ class ToolRouter:
                     upstream_resources = await self.upstream_client.list_resources(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
-                    logger.warning("failed to list resources for upstream %s: %s", upstream_name, exc)
+                    logger.warning("failed to list resources for upstream %s: %s", upstream_name, unwrap_error(exc))
                     continue
                 for resource in upstream_resources:
                     resources.append(prefix_resource(upstream_name, resource))
@@ -331,8 +348,8 @@ class ToolRouter:
                     "event_type": "list_resources",
                     "status": "error",
                     "duration_ms": self._duration_ms(started),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc)[:500],
+                    "error_type": error_type_name(exc),
+                    "error_message": error_message(exc),
                 }
             )
             raise
@@ -348,7 +365,7 @@ class ToolRouter:
                     upstream_templates = await self.upstream_client.list_resource_templates(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
-                    logger.warning("failed to list resource templates for upstream %s: %s", upstream_name, exc)
+                    logger.warning("failed to list resource templates for upstream %s: %s", upstream_name, unwrap_error(exc))
                     continue
                 for template in upstream_templates:
                     templates.append(prefix_resource_template(upstream_name, template))
@@ -371,8 +388,8 @@ class ToolRouter:
                     "event_type": "list_resource_templates",
                     "status": "error",
                     "duration_ms": self._duration_ms(started),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc)[:500],
+                    "error_type": error_type_name(exc),
+                    "error_message": error_message(exc),
                 }
             )
             raise
@@ -414,8 +431,8 @@ class ToolRouter:
                     "server_name": upstream.server_name if upstream else None,
                     "resource_uri": proxied_uri,
                     "duration_ms": self._duration_ms(started),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc)[:500],
+                    "error_type": error_type_name(exc),
+                    "error_message": error_message(exc),
                     "upstream_transport": upstream.config.transport if upstream else None,
                 }
             )
@@ -573,7 +590,7 @@ class ToolRouter:
         return max(0, int((monotonic() - started) * 1000))
 
     def _list_tools_error_message(self, failures: list[tuple[str, Exception]]) -> str:
-        return "; ".join(f"{name}: {type(exc).__name__}" for name, exc in failures)[:500]
+        return "; ".join(f"{name}: {error_type_name(exc)}" for name, exc in failures)[:500]
 
 
 def prefix_tool(upstream_name: str, tool: Tool) -> Tool:
