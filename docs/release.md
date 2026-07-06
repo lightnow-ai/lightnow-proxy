@@ -56,7 +56,32 @@ Before publishing the Registry listing:
 
 ## Checklist
 
-Before publishing a release:
+Release Please owns normal version bumps, changelog updates, Git tags, and
+GitHub Releases from Conventional Commits.
+
+Required GitHub setup:
+
+- Repository secret: `RELEASE_PLEASE_TOKEN`
+- Token permissions: contents, pull requests, and issues read/write for this
+  repository
+- Repository Actions setting: allow GitHub Actions to create pull requests
+
+Use a real PAT or GitHub App token for `RELEASE_PLEASE_TOKEN`, not the default
+`GITHUB_TOKEN`. Tags created with the default token do not trigger the existing
+tag-based `Release` workflow, so PyPI publishing would not run.
+
+Normal release flow:
+
+1. Merge Conventional Commit changes to `main`.
+2. Release Please opens or updates a release PR.
+3. Merge the release PR when ready.
+4. Release Please creates the `vX.Y.Z` tag and GitHub Release.
+5. The existing tag-based `Release` workflow builds and publishes PyPI
+   distributions through Trusted Publishing.
+6. Update the Homebrew tap after the release artifact is available.
+7. Publish or update the official MCP Registry listing from `server.json`.
+
+Manual release checklist for fallback or first-time setup:
 
 1. Update `pyproject.toml` to the target semantic version.
 2. Run:
