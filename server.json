@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.lightnow-ai/lightnow-proxy",
+  "title": "LightNow Local Proxy",
+  "description": "Route MCP clients through LightNow-managed local proxy profiles.",
+  "repository": {
+    "url": "https://github.com/lightnow-ai/lightnow-proxy",
+    "source": "github"
+  },
+  "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients",
+  "version": "1.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "lightnow-proxy",
+      "version": "1.1.0",
+      "runtimeHint": "python",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--config",
+          "description": "Path to the LightNow-generated Local Proxy config file.",
+          "format": "filepath",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio"
+        }
+      ]
+    }
+  ]
+}

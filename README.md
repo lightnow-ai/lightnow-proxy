@@ -1,5 +1,7 @@
 # LightNow Local Proxy
 
+<!-- mcp-name: io.github.lightnow-ai/lightnow-proxy -->
+
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
 
 The **LightNow Local Proxy** lets local MCP clients use one LightNow-managed
