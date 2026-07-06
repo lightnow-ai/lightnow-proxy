@@ -72,6 +72,14 @@ Check the local setup:
 lightnow config-status --client codex
 ```
 
+Check whether the proxy can resolve the selected profile and reach its upstream
+MCP servers:
+
+```sh
+lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
+lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
+```
+
 ## More Documentation
 
 Detailed setup guides, examples, diagrams, supported client paths, telemetry
@@ -101,4 +109,10 @@ Run the proxy as a stdio MCP server:
 
 ```sh
 uv run lightnow-proxy --config config.example.yaml --transport stdio
+```
+
+Run a local health check against the example config:
+
+```sh
+uv run lightnow-proxy --config config.example.yaml --health
 ```

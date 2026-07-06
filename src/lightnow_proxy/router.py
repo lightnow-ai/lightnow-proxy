@@ -50,6 +50,18 @@ class ClientRuntimeContext:
     capability_keys: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class UpstreamHealth:
+    name: str
+    transport: str
+    server_name: str | None
+    status: str
+    tool_count: int = 0
+    duration_ms: int | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+
+
 class ToolRouter:
     def __init__(self, config: ProxyConfig, upstream_client: UpstreamMCPClient | None = None):
         self.config = config
@@ -144,6 +156,39 @@ class ToolRouter:
             return upstream_name, await self.upstream_client.list_tools(config), None
         except Exception as exc:
             return upstream_name, [], exc
+
+    async def profile_upstream_health(self, profile_name: str) -> list[UpstreamHealth]:
+        upstreams = await self._profile_upstream_details(profile_name)
+        results = await asyncio.gather(
+            *[
+                self._measure_upstream_health(upstream_name, upstream)
+                for upstream_name, upstream in upstreams.items()
+            ]
+        )
+        return sorted(results, key=lambda item: item.name)
+
+    async def _measure_upstream_health(self, upstream_name: str, upstream: ProfileUpstream) -> UpstreamHealth:
+        started = monotonic()
+        _, tools, exc = await self._list_upstream_tools(upstream_name, upstream.config)
+        duration_ms = self._duration_ms(started)
+        if exc is not None:
+            return UpstreamHealth(
+                name=upstream_name,
+                transport=upstream.config.transport,
+                server_name=upstream.server_name,
+                status="error",
+                duration_ms=duration_ms,
+                error_type=type(exc).__name__,
+                error_message=str(exc)[:500],
+            )
+        return UpstreamHealth(
+            name=upstream_name,
+            transport=upstream.config.transport,
+            server_name=upstream.server_name,
+            status="healthy",
+            tool_count=len(tools),
+            duration_ms=duration_ms,
+        )
 
     def _tool_cache_path(self, profile_name: str) -> Path | None:
         local_proxy = self.config.local_proxy

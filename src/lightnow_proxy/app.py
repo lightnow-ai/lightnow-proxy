@@ -19,6 +19,7 @@ import structlog
 from lightnow_proxy import __version__
 from lightnow_proxy.auth import AuthError, TokenVerifier, has_required_group
 from lightnow_proxy.config import ProxyConfig
+from lightnow_proxy.health import build_health_report
 from lightnow_proxy.request_context import current_principal
 from lightnow_proxy.router import ToolRouter, ToolRoutingError
 
@@ -237,8 +238,12 @@ def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: 
     async def status_endpoint(request: Request) -> Response:
         return await status(request, config)
 
+    async def health_endpoint(_request: Request) -> Response:
+        return JSONResponse(await build_health_report(config))
+
     routes = [
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/health", health_endpoint, methods=["GET"]),
         Route("/status", status_endpoint, methods=["GET"]),
     ]
     if local_proxy_app is not None:

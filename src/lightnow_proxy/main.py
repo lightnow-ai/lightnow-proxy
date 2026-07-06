@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import anyio
+import json
 import os
 
 from mcp.server.stdio import stdio_server
@@ -11,6 +12,7 @@ from lightnow_proxy import __version__
 from lightnow_proxy.app import LocalProxyMCPApp, create_app
 from lightnow_proxy.capture import capture_enabled, capture_read_stream, initialize_capture_file, initialize_client_context
 from lightnow_proxy.config import ProxyConfig, load_config
+from lightnow_proxy.health import build_health_report, format_health_summary, health_exit_code
 from lightnow_proxy.router import ToolRouter
 
 
@@ -29,12 +31,12 @@ def main() -> None:
     parser.add_argument(
         "--transport",
         choices=["http", "stdio"],
-        default=os.environ.get("MCP_PROXY_TRANSPORT", "http"),
+        default=os.environ.get("LIGHTNOW_PROXY_TRANSPORT", os.environ.get("MCP_PROXY_TRANSPORT", "http")),
         help="Client-facing transport to serve.",
     )
     parser.add_argument(
         "--capture-path",
-        default=os.environ.get("MCP_PROXY_CAPTURE_PATH"),
+        default=os.environ.get("LIGHTNOW_PROXY_CAPTURE_PATH", os.environ.get("MCP_PROXY_CAPTURE_PATH")),
         help="Optional text file for redacted inbound MCP initialize/request capture.",
     )
     parser.add_argument(
@@ -42,10 +44,27 @@ def main() -> None:
         action="store_true",
         help="Fetch the local proxy profile tool list once, update the cache, and exit.",
     )
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Check the configured proxy profile and upstream MCP servers, then exit.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON for --health.",
+    )
     args = parser.parse_args()
 
     config_path = args.config
     config = load_config(config_path)
+    if args.health:
+        report = anyio.run(build_health_report, config)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(format_health_summary(report))
+        raise SystemExit(health_exit_code(report))
     if args.warm_tools_cache:
         anyio.run(warm_tools_cache, config)
         return

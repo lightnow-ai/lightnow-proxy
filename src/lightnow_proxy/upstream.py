@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import AsyncIterator
+import os
+import sys
+from typing import AsyncIterator, TextIO
 
 import httpx
 from mcp import ClientSession
@@ -14,6 +16,10 @@ from lightnow_proxy.config import UpstreamConfig
 
 
 class UpstreamMCPClient:
+    def __init__(self, errlog: TextIO | None = None, *, suppress_stdio_stderr: bool = False):
+        self.errlog = errlog if errlog is not None else sys.stderr
+        self.suppress_stdio_stderr = suppress_stdio_stderr
+
     @asynccontextmanager
     async def session(self, config: UpstreamConfig) -> AsyncIterator[ClientSession]:
         if config.transport == "stdio":
@@ -54,7 +60,23 @@ class UpstreamMCPClient:
             env=config.resolved_env() or None,
             cwd=config.cwd,
         )
-        async with stdio_client(parameters) as (read_stream, write_stream):
+        if self.suppress_stdio_stderr:
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
+                async with self._stdio_client_session(parameters, config, errlog) as session:
+                    yield session
+            return
+
+        async with self._stdio_client_session(parameters, config, self.errlog) as session:
+            yield session
+
+    @asynccontextmanager
+    async def _stdio_client_session(
+        self,
+        parameters: StdioServerParameters,
+        config: UpstreamConfig,
+        errlog: TextIO,
+    ) -> AsyncIterator[ClientSession]:
+        async with stdio_client(parameters, errlog=errlog) as (read_stream, write_stream):
             session = ClientSession(
                 read_stream,
                 write_stream,

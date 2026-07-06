@@ -109,11 +109,35 @@ as values. Runtime telemetry must not include tool arguments, tool results,
 resource contents, workspace paths, git remotes, commit hashes, secrets or
 authorization headers.
 
-For daemon-style local runs, `/status` returns a non-secret status document with
-the local proxy mode, selected profile, runner identity, client identity,
-telemetry flag, observe/enforce policy posture, unmanaged-server policy,
-Registry API usage flags, profile names and static upstream names. It is meant
-for local health checks and future UI/installer handoff.
+## Health And Status
+
+`/healthz` is a cheap liveness endpoint. It only proves that the process can
+answer local HTTP requests.
+
+`/status` returns a non-secret static status document with the local proxy mode,
+selected profile, runner identity, client identity, telemetry flag,
+observe/enforce policy posture, unmanaged-server policy, Registry API usage
+flags, profile names and static upstream names. It is meant for local installers
+and support tooling that need to inspect the configured posture without touching
+upstream MCP servers.
+
+`/health` and `lightnow-proxy --health` perform an active health check. They
+resolve the selected profile and run tool discovery against each upstream MCP
+server. The report classifies the proxy as:
+
+- `healthy`: the selected profile resolves and all upstreams answer.
+- `degraded`: the proxy can run, but at least one upstream failed or the active
+  profile has no upstreams.
+- `failed`: the selected profile cannot be resolved.
+
+The active health report includes profile name, upstream alias, transport,
+server name, duration, tool count and redacted error type/message. It must not
+include secrets, authorization headers, tool arguments, tool results or resource
+contents.
+
+The CLI exits with code `0` for `healthy`, `2` for `degraded`, and `1` for
+`failed` so installers and future UI handoff code can distinguish "proxy is
+down" from "one configured server is unhealthy".
 
 ## Legacy Profile Proxy
 

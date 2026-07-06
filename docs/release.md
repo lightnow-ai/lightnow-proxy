@@ -58,11 +58,15 @@ Before publishing a release:
 8. Verify fresh installs on a clean machine or isolated tool environment:
    ```bash
    uv tool install lightnow-proxy
-   lightnow-proxy --help
+   lightnow-proxy --version
    pipx install lightnow-proxy
-   lightnow-proxy --help
+   lightnow-proxy --version
    ```
-9. Verify at least one real Local Proxy sync and MCP call with the current
-   LightNow CLI against the local or production Registry API.
+9. Verify one local health check:
+   ```bash
+   lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
+   ```
+10. Verify at least one real Local Proxy sync and MCP call with the current
+    LightNow CLI against the local or production Registry API.
 
 Do not publish with long-lived local PyPI tokens.

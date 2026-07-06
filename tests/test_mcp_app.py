@@ -32,6 +32,7 @@ from lightnow_proxy.config import (
     ServerConfig,
     UpstreamConfig,
 )
+from lightnow_proxy.health import build_health_report
 from lightnow_proxy.registry import ResolvedRuntimeUpstream
 from lightnow_proxy.upstream import UpstreamMCPClient
 
@@ -53,6 +54,14 @@ class FakeUpstreamClient:
                 )
             ]
         )
+
+
+class FailingUpstreamClient(FakeUpstreamClient):
+    async def list_tools(self, config: UpstreamConfig) -> list[Tool]:
+        host = str(config.url.host) if config.url is not None else str(config.command)
+        if "grafana" in host:
+            raise TimeoutError("upstream did not answer")
+        return await super().list_tools(config)
 
 
 class FakeRegistryClient:
@@ -80,6 +89,28 @@ async def test_healthz() -> None:
         response = await client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_health_endpoint_reports_active_local_proxy_profile() -> None:
+    config = ProxyConfig(
+        server=ServerConfig(),
+        local_proxy={"enabled": True, "profile": "default"},
+        auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+        profiles={"default": ProfileConfig()},
+        upstreams={},
+    )
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "degraded"
+    assert payload["profiles"][0]["name"] == "default"
+    assert payload["profiles"][0]["warning"] == "profile has no upstream MCP servers"
 
 
 @pytest.mark.asyncio
@@ -122,6 +153,53 @@ async def test_status_reports_non_secret_local_proxy_runtime_state() -> None:
     assert payload["static_upstreams"] == ["grafana", "nextcloud"]
     assert "token" not in str(payload).lower()
     assert "secret" not in str(payload).lower()
+
+
+@pytest.mark.asyncio
+async def test_health_reports_profile_upstream_status_without_secrets() -> None:
+    from lightnow_proxy.router import ToolRouter
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    config.local_proxy.client_name = "codex"
+    config.local_proxy.client_transport = "stdio"
+    router = ToolRouter(config, upstream_client=FakeUpstreamClient())
+
+    payload = await build_health_report(config, router)
+    assert payload["status"] == "healthy"
+    assert payload["mode"] == "local_proxy"
+    assert payload["summary"] == {
+        "profiles": 1,
+        "upstreams": 2,
+        "healthy_upstreams": 2,
+        "failed_upstreams": 0,
+        "tools": 2,
+    }
+    assert payload["local_proxy"]["client_name"] == "codex"
+    assert {upstream["name"] for upstream in payload["profiles"][0]["upstreams"]} == {"grafana", "nextcloud"}
+    assert all(upstream["status"] == "healthy" for upstream in payload["profiles"][0]["upstreams"])
+    assert "token" not in str(payload).lower()
+    assert "secret" not in str(payload).lower()
+
+
+@pytest.mark.asyncio
+async def test_health_reports_degraded_when_an_upstream_fails() -> None:
+    from lightnow_proxy.router import ToolRouter
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    router = ToolRouter(config, upstream_client=FailingUpstreamClient())
+
+    payload = await build_health_report(config, router)
+    assert payload["status"] == "degraded"
+    assert payload["summary"]["healthy_upstreams"] == 1
+    assert payload["summary"]["failed_upstreams"] == 1
+    upstreams = {upstream["name"]: upstream for upstream in payload["profiles"][0]["upstreams"]}
+    assert upstreams["grafana"]["status"] == "error"
+    assert upstreams["grafana"]["error_type"] == "TimeoutError"
+    assert upstreams["nextcloud"]["status"] == "healthy"
 
 
 @pytest.mark.asyncio
