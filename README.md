@@ -24,13 +24,20 @@ pipx install lightnow-cli
 lightnow login
 ```
 
-Install the proxy with `pipx`:
+Install the proxy with Homebrew:
+
+```sh
+brew tap lightnow-ai/tap
+brew install lightnow-proxy
+```
+
+Or install it with `pipx`:
 
 ```sh
 pipx install lightnow-proxy
 ```
 
-Or with `uv`:
+Or install it with `uv`:
 
 ```sh
 uv tool install lightnow-proxy
