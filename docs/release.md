@@ -12,6 +12,7 @@ Use these settings for the public package:
 
 - Repository name: `lightnow-proxy`
 - PyPI project name: `lightnow-proxy`
+- Official MCP Registry name: `io.github.lightnow-ai/lightnow-proxy`
 - Installed command: `lightnow-proxy`
 - License: `Apache-2.0`
 - Topics: `lightnow`, `mcp`, `model-context-protocol`, `local-proxy`
@@ -19,6 +20,39 @@ Use these settings for the public package:
 Keep the installed command as `lightnow-proxy` so generated MCP client configs
 use a LightNow-owned executable name and do not collide with generic MCP proxy
 packages.
+
+## Official MCP Registry
+
+The official MCP Registry listing is prepared from `server.json`. The Registry
+hosts metadata only; the runnable artifact remains the PyPI package.
+
+For PyPI ownership verification, keep this marker in `README.md` so it is
+present in the PyPI long description:
+
+```markdown
+<!-- mcp-name: io.github.lightnow-ai/lightnow-proxy -->
+```
+
+Before publishing the Registry listing:
+
+1. Ensure `server.json` version and package version match `pyproject.toml`.
+2. Ensure the referenced PyPI version is already published.
+3. Install the official publisher:
+   ```bash
+   brew install mcp-publisher
+   ```
+4. Authenticate with the Registry:
+   ```bash
+   mcp-publisher login github
+   ```
+5. Publish from the repository root:
+   ```bash
+   mcp-publisher publish
+   ```
+6. Verify the published metadata:
+   ```bash
+   curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.lightnow-ai/lightnow-proxy"
+   ```
 
 ## Checklist
 
@@ -56,18 +90,19 @@ Before publishing a release:
    - formula: `Formula/lightnow-proxy.rb`
    - replace the formula template URL, version and SHA256 with the released artifact,
    - run `brew audit`, `brew install --build-from-source`, and `brew test`.
-8. Verify fresh installs on a clean machine or isolated tool environment:
+8. Publish or update the official MCP Registry listing from `server.json`.
+9. Verify fresh installs on a clean machine or isolated tool environment:
    ```bash
    uv tool install lightnow-proxy
    lightnow-proxy --version
    pipx install lightnow-proxy
    lightnow-proxy --version
    ```
-9. Verify one local active upstream check:
+10. Verify one local active upstream check:
    ```bash
    lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
    ```
-10. Verify at least one real Local Proxy sync and MCP call with the current
+11. Verify at least one real Local Proxy sync and MCP call with the current
     LightNow CLI against the local or production Registry API.
 
 Do not publish with long-lived local PyPI tokens.
