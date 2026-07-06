@@ -1,0 +1,64 @@
+[project]
+name = "lightnow-proxy"
+version = "1.0.0"
+description = "LightNow Local Proxy for centrally managed MCP client configuration"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "LightNow Engineering", email = "development@lightnow.ai" }
+]
+license = "Apache-2.0"
+keywords = ["lightnow", "mcp", "model-context-protocol", "local-proxy", "proxy"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Utilities",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "mcp[cli]>=1.24.0",
+  "httpx>=0.28.1",
+  "pydantic>=2.8.2",
+  "pydantic-settings>=2.6.1",
+  "pyjwt[crypto]>=2.10.1",
+  "python-dotenv>=1.0.1",
+  "pyyaml>=6.0.2",
+  "structlog>=24.4.0",
+  "uvicorn[standard]>=0.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.3",
+  "pytest-asyncio>=0.24.0",
+  "respx>=0.21.1",
+  "ruff>=0.8.0",
+]
+
+[project.scripts]
+lightnow-proxy = "lightnow_proxy.main:main"
+
+[project.urls]
+Homepage = "https://github.com/lightnow-ai/lightnow-proxy"
+Repository = "https://github.com/lightnow-ai/lightnow-proxy"
+Documentation = "https://docs.lightnow.ai/getting-started/sync-mcp-clients"
+
+[build-system]
+requires = ["setuptools>=69.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"

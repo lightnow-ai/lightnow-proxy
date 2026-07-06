@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import argparse
+import anyio
+import os
+
+from mcp.server.stdio import stdio_server
+import uvicorn
+
+from lightnow_proxy.app import LocalProxyMCPApp, create_app
+from lightnow_proxy.capture import capture_enabled, capture_read_stream, initialize_capture_file, initialize_client_context
+from lightnow_proxy.config import ProxyConfig, load_config
+from lightnow_proxy.router import ToolRouter
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="LightNow MCP proxy")
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("LIGHTNOW_PROXY_CONFIG", "config.example.yaml"),
+        help="Path to the LightNow Proxy YAML config.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["http", "stdio"],
+        default=os.environ.get("MCP_PROXY_TRANSPORT", "http"),
+        help="Client-facing transport to serve.",
+    )
+    parser.add_argument(
+        "--capture-path",
+        default=os.environ.get("MCP_PROXY_CAPTURE_PATH"),
+        help="Optional text file for redacted inbound MCP initialize/request capture.",
+    )
+    parser.add_argument(
+        "--warm-tools-cache",
+        action="store_true",
+        help="Fetch the local proxy profile tool list once, update the cache, and exit.",
+    )
+    args = parser.parse_args()
+
+    config_path = args.config
+    config = load_config(config_path)
+    if args.warm_tools_cache:
+        anyio.run(warm_tools_cache, config)
+        return
+    if args.transport == "stdio":
+        anyio.run(run_stdio, config, args.capture_path, config_path)
+        return
+
+    app = create_app(config)
+    uvicorn.run(app, host=config.server.host, port=config.server.port)
+
+
+async def warm_tools_cache(config: ProxyConfig) -> None:
+    if not config.local_proxy.enabled:
+        raise RuntimeError("tools cache warming requires local_proxy.enabled=true")
+    router = ToolRouter(config)
+    tools = await router.list_tools(config.local_proxy.profile)
+    print(f"Warmed tools cache for profile {config.local_proxy.profile}: {len(tools)} tools")
+
+
+async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config_path: str = "") -> None:
+    if not config.local_proxy.enabled:
+        raise RuntimeError("stdio transport requires local_proxy.enabled=true")
+
+    router = ToolRouter(config)
+    server = LocalProxyMCPApp(config, router).server
+
+    def observe_initialize(session_message) -> None:
+        context = initialize_client_context(session_message)
+        if context is not None:
+            router.update_client_context(
+                name=context.get("name"),
+                version=context.get("version"),
+                capability_keys=context.get("capability_keys"),
+            )
+
+    async with stdio_server() as (read_stream, write_stream):
+        active_capture_path = capture_path if capture_enabled(capture_path) else None
+        if active_capture_path is not None:
+            initialize_capture_file(active_capture_path, config_path)
+        captured_read_stream, forward_messages = await capture_read_stream(
+            read_stream,
+            active_capture_path,
+            observe_initialize,
+        )
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(forward_messages)
+            await router.emit_lifecycle_event("runner_started")
+            try:
+                await server.run(
+                    captured_read_stream,
+                    write_stream,
+                    server.create_initialization_options(),
+                    stateless=True,
+                )
+            finally:
+                await router.emit_lifecycle_event("runner_stopped")
+
+
+if __name__ == "__main__":
+    main()

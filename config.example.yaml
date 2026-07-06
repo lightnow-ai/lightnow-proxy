@@ -1,0 +1,53 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+  public_url: "http://localhost:8080"
+
+local_proxy:
+  enabled: true
+  profile: "default"
+  path: "/mcp"
+  client_name: "codex"
+  client_version: null
+  runner_name: "lightnow-local-proxy"
+  runner_version: "1.0.0"
+  client_transport: "stdio"
+
+auth:
+  enabled: false
+  issuer: "https://auth.lightnow.ai/realms/lightnow"
+  audience:
+    - "lightnow-proxy"
+  groups_claim: "groups"
+  jwks_cache_seconds: 300
+
+registry_api:
+  enabled: false
+  base_url: "https://registry-api.lightnow.ai"
+  # Optional CA bundle for LightNow Registry/Auth only. Do not use global
+  # SSL_CERT_FILE for this unless every downstream MCP server uses the same CA.
+  ca_file: null
+  token_url: "https://auth.lightnow.ai/realms/lightnow/protocol/openid-connect/token"
+  client_id: "lightnow-proxy"
+  client_secret: "${REGISTRY_API_CLIENT_SECRET}"
+  include_secrets: true
+  default_scope_type: "system"
+  timeout_seconds: 20
+
+profiles:
+  default:
+    upstreams:
+      - "echo"
+      - "math"
+
+upstreams:
+  echo:
+    transport: "stdio"
+    command: "uv"
+    args:
+      - "run"
+      - "python"
+      - "examples/echo_stdio_server.py"
+  math:
+    transport: "streamable-http"
+    url: "http://127.0.0.1:8091/mcp"

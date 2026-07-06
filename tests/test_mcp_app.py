@@ -1,0 +1,628 @@
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
+import socket
+import sys
+from typing import Any, AsyncIterator
+
+import httpx
+from mcp import ClientSession
+from mcp.server import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.client.streamable_http import streamable_http_client
+from mcp import types
+from mcp.types import CallToolResult, TextContent, Tool
+import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
+import uvicorn
+
+from lightnow_proxy import __version__
+from lightnow_proxy.app import create_app, register_unvalidated_call_tool_handler
+from lightnow_proxy.auth import Principal
+from lightnow_proxy.config import (
+    AuthConfig,
+    ProfileConfig,
+    ProxyConfig,
+    RegistryApiConfig,
+    RuntimeUpstreamConfig,
+    ServerConfig,
+    UpstreamConfig,
+)
+from lightnow_proxy.registry import ResolvedRuntimeUpstream
+from lightnow_proxy.upstream import UpstreamMCPClient
+
+
+class FakeUpstreamClient:
+    async def list_tools(self, config: UpstreamConfig) -> list[Tool]:
+        host = str(config.url.host) if config.url is not None else str(config.command)
+        if "grafana" in host:
+            return [Tool(name="query_loki_logs", description="Query logs", inputSchema={"type": "object"})]
+        return [Tool(name="search_files", description="Search files", inputSchema={"type": "object"})]
+
+    async def call_tool(self, config: UpstreamConfig, tool_name: str, arguments: dict | None) -> CallToolResult:
+        assert config.url is not None
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"{config.url.host}:{tool_name}:{arguments or {}}",
+                )
+            ]
+        )
+
+
+class FakeRegistryClient:
+    def __init__(self) -> None:
+        self.principals: list[Principal | None] = []
+
+    async def resolve_upstream(
+        self,
+        upstream: RuntimeUpstreamConfig,
+        principal: Principal | None,
+    ) -> ResolvedRuntimeUpstream:
+        self.principals.append(principal)
+        return ResolvedRuntimeUpstream(
+            name=upstream.name,
+            config=UpstreamConfig(url=f"https://{upstream.name}.example.test/mcp"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_healthz() -> None:
+    config = build_config()
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_status_reports_non_secret_local_proxy_runtime_state() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    config.local_proxy.client_name = "codex"
+    config.local_proxy.client_transport = "stdio"
+    config.local_proxy.policy_mode = "enforce"
+    config.local_proxy.allow_unmanaged_client_servers = False
+    config.registry_api = RegistryApiConfig(
+        enabled=True,
+        base_url="https://registry-api.example.test",
+        use_cli_session=True,
+    )
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["mode"] == "local_proxy"
+    assert payload["runner"] == {
+        "name": "lightnow-local-proxy",
+        "version": __version__,
+    }
+    assert payload["local_proxy"]["profile"] == "admins"
+    assert payload["local_proxy"]["client_name"] == "codex"
+    assert payload["local_proxy"]["client_transport"] == "stdio"
+    assert payload["local_proxy"]["policy_mode"] == "enforce"
+    assert payload["local_proxy"]["allow_unmanaged_client_servers"] is False
+    assert payload["local_proxy"]["telemetry_enabled"] is True
+    assert payload["registry_api"]["enabled"] is True
+    assert payload["registry_api"]["use_cli_session"] is True
+    assert payload["profiles"] == ["admins", "users"]
+    assert payload["static_upstreams"] == ["grafana", "nextcloud"]
+    assert "token" not in str(payload).lower()
+    assert "secret" not in str(payload).lower()
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_lifespan_emits_runner_lifecycle_events() -> None:
+    class FakeRuntimeRegistry:
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        async def post_runtime_event(self, payload: dict[str, Any]) -> None:
+            self.events.append(payload)
+
+    config = ProxyConfig(
+        server=ServerConfig(),
+        local_proxy={
+            "enabled": True,
+            "profile": "default",
+            "sync_from_lightnow": True,
+            "client_name": "codex",
+            "client_transport": "stdio",
+            "policy_mode": "enforce",
+            "allow_unmanaged_client_servers": False,
+        },
+        auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+        registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
+        profiles={"default": ProfileConfig()},
+        upstreams={},
+    )
+
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config)
+    registry = FakeRuntimeRegistry()
+    router.registry_client = registry
+    app = create_app(config, router=router)
+
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert [event["event_type"] for event in registry.events] == [
+        "runner_started",
+        "runner_stopped",
+    ]
+    assert registry.events[0]["profile"] == "default"
+    assert registry.events[0]["status"] == "success"
+    assert registry.events[0]["mcp_client_name"] == "codex"
+    assert registry.events[0]["runner_name"] == "lightnow-local-proxy"
+    assert registry.events[0]["runner_version"] == __version__
+    assert registry.events[0]["local_proxy_policy_mode"] == "enforce"
+    assert registry.events[0]["local_proxy_allow_unmanaged_client_servers"] is False
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_telemetry_can_be_disabled() -> None:
+    class FakeRuntimeRegistry:
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        async def post_runtime_event(self, payload: dict[str, Any]) -> None:
+            self.events.append(payload)
+
+    config = ProxyConfig(
+        server=ServerConfig(),
+        local_proxy={
+            "enabled": True,
+            "profile": "default",
+            "sync_from_lightnow": True,
+            "client_name": "codex",
+            "client_transport": "stdio",
+            "telemetry_enabled": False,
+        },
+        auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+        registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
+        profiles={"default": ProfileConfig()},
+        upstreams={},
+    )
+
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config)
+    registry = FakeRuntimeRegistry()
+    router.registry_client = registry
+    app = create_app(config, router=router)
+
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert registry.events == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_lists_and_calls_prefixed_tools() -> None:
+    config = build_config()
+    from lightnow_proxy.router import ToolRouter
+
+    app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            http_client.headers["Authorization"] = "Bearer admin-token"
+            async with streamable_http_client(
+                "http://testserver/profiles/admins/mcp",
+                http_client=http_client,
+            ) as (read_stream, write_stream, _session_id):
+                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
+                async with session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    names = {tool.name for tool in tools.tools}
+                    assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
+
+                    result = await session.call_tool("grafana__query_loki_logs", arguments={"logql": "{job=\"x\"}"})
+                    assert result.isError is False
+                    assert "grafana.example.test:query_loki_logs" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_enforces_groups() -> None:
+    config = build_config()
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            http_client.headers["Authorization"] = "Bearer user-token"
+            response = await http_client.post(
+                "/profiles/admins/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0.1.0"},
+                    },
+                },
+            )
+            assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_resolves_runtime_upstreams_with_principal() -> None:
+    config = build_runtime_config()
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config, upstream_client=FakeUpstreamClient())
+    registry_client = FakeRegistryClient()
+    router.registry_client = registry_client
+    app = create_app(config, router=router)
+    transport = httpx.ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            http_client.headers["Authorization"] = "Bearer admin-token"
+            async with streamable_http_client(
+                "http://testserver/profiles/admins/mcp",
+                http_client=http_client,
+            ) as (read_stream, write_stream, _session_id):
+                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
+                async with session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+
+    assert {tool.name for tool in tools.tools} == {"grafana__query_loki_logs"}
+    assert registry_client.principals[0] is not None
+    assert registry_client.principals[0].username == "nils.friedrichs"
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_endpoint_lists_and_calls_selected_profile_tools() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+
+    from lightnow_proxy.router import ToolRouter
+
+    app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            async with streamable_http_client(
+                "http://testserver/mcp",
+                http_client=http_client,
+            ) as (read_stream, write_stream, _session_id):
+                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
+                async with session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    names = {tool.name for tool in tools.tools}
+                    assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
+
+                    result = await session.call_tool("nextcloud__search_files", arguments={"query": "m2"})
+                    assert result.isError is False
+                    assert "nextcloud.example.test:search_files" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_call_tool_does_not_force_tool_listing() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    calls: list[str] = []
+
+    class CallOnlyRouter:
+        async def list_tools(self, profile_name: str) -> list[Tool]:
+            calls.append("list_tools")
+            return [
+                Tool(
+                    name="jenkins__getStatus",
+                    description="Get Jenkins status",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            ]
+
+        async def call_tool(
+            self,
+            profile_name: str,
+            name: str,
+            arguments: dict[str, Any] | None = None,
+            request_meta: dict[str, Any] | None = None,
+        ) -> CallToolResult:
+            calls.append("call_tool")
+            assert profile_name == "admins"
+            assert name == "jenkins__getStatus"
+            assert arguments == {}
+            assert request_meta is None
+            return CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    app = create_app(config, router=CallOnlyRouter())
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            async with streamable_http_client(
+                "http://testserver/mcp",
+                http_client=http_client,
+            ) as (read_stream, write_stream, _session_id):
+                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
+                async with session:
+                    await session.initialize()
+                    result = await session.call_tool("jenkins__getStatus", arguments={})
+
+    assert result.isError is False
+    assert result.content[0].text == "ok"
+    assert calls == ["call_tool", "list_tools"]
+
+
+@pytest.mark.asyncio
+async def test_unvalidated_call_tool_handler_forwards_request_meta() -> None:
+    server: Server = Server("test")
+    captured: dict[str, Any] = {}
+
+    async def handler(name: str, arguments: dict[str, Any], request_meta: dict[str, Any] | None) -> CallToolResult:
+        captured["name"] = name
+        captured["arguments"] = arguments
+        captured["request_meta"] = request_meta
+        return CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    register_unvalidated_call_tool_handler(server, handler)
+    request = types.CallToolRequest.model_validate(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "jenkins__getStatus",
+                "arguments": {"jobFullName": "lightnow-ai/registry-api/master"},
+                "_meta": {
+                    "threadId": "thread-1",
+                    "x-codex-turn-metadata": {
+                        "model": "gpt-5.5",
+                        "turn_id": "turn-1",
+                    },
+                },
+            },
+        }
+    )
+
+    result = await server.request_handlers[types.CallToolRequest](request)
+
+    assert result.root.content[0].text == "ok"
+    assert captured == {
+        "name": "jenkins__getStatus",
+        "arguments": {"jobFullName": "lightnow-ai/registry-api/master"},
+        "request_meta": {
+            "threadId": "thread-1",
+            "x-codex-turn-metadata": {
+                "model": "gpt-5.5",
+                "turn_id": "turn-1",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_lists_and_calls_tools(tmp_path) -> None:
+    server = tmp_path / "echo_server.py"
+    server.write_text(
+        """
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("echo")
+
+@mcp.tool()
+def echo(value: str) -> str:
+    return f"echo:{value}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    upstream = UpstreamConfig(
+        transport="stdio",
+        command=sys.executable,
+        args=[str(server)],
+        timeout_seconds=5,
+    )
+
+    client = UpstreamMCPClient()
+    tools = await client.list_tools(upstream)
+    assert [tool.name for tool in tools] == ["echo"]
+
+    result = await client.call_tool(upstream, "echo", {"value": "ok"})
+    assert result.isError is False
+    assert result.content[0].text == "echo:ok"
+
+
+@pytest.mark.asyncio
+async def test_local_proxy_routes_to_stdio_and_streamable_http_upstreams(tmp_path) -> None:
+    stdio_server = tmp_path / "echo_server.py"
+    stdio_server.write_text(
+        """
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("echo")
+
+@mcp.tool()
+def echo(value: str) -> str:
+    return f"echo:{value}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    async with run_math_upstream_server() as math_url:
+        config = ProxyConfig(
+            server=ServerConfig(),
+            local_proxy={"enabled": True, "profile": "default"},
+            auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+            profiles={"default": ProfileConfig(upstreams=["echo", "math"])},
+            upstreams={
+                "echo": UpstreamConfig(transport="stdio", command=sys.executable, args=[str(stdio_server)]),
+                "math": UpstreamConfig(url=math_url),
+            },
+        )
+
+        local_app = create_app(config)
+        transport = httpx.ASGITransport(app=local_app)
+
+        async with local_app.router.lifespan_context(local_app):
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+                profile_response = await http_client.get("/profiles/default/mcp")
+                assert profile_response.status_code == 404
+
+                async with streamable_http_client(
+                    "http://testserver/mcp",
+                    http_client=http_client,
+                ) as (read_stream, write_stream, _session_id):
+                    session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=10))
+                    async with session:
+                        await session.initialize()
+                        tools = await session.list_tools()
+                        assert {tool.name for tool in tools.tools} == {"echo__echo", "math__add"}
+
+                        echo = await session.call_tool("echo__echo", arguments={"value": "ok"})
+                        assert echo.isError is False
+                        assert echo.content[0].text == "echo:ok"
+
+                        add = await session.call_tool("math__add", arguments={"left": 2, "right": 3})
+                        assert add.isError is False
+                        assert add.content[0].text == "5"
+
+
+@asynccontextmanager
+async def run_math_upstream_server() -> AsyncIterator[str]:
+    manager = StreamableHTTPSessionManager(
+        app=build_math_upstream_server(),
+        json_response=False,
+        stateless=True,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        async with manager.run():
+            yield
+
+    app = Starlette(routes=[Route("/mcp", MathUpstreamApp(manager))], lifespan=lifespan)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+            lifespan="on",
+        )
+    )
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(50):
+            if server.started:
+                break
+            await asyncio.sleep(0.02)
+        if not server.started:
+            raise RuntimeError("math upstream server did not start")
+        yield f"http://{host}:{port}/mcp"
+    finally:
+        server.should_exit = True
+        await task
+
+
+class MathUpstreamApp:
+    def __init__(self, manager: StreamableHTTPSessionManager):
+        self.manager = manager
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self.manager.handle_request(scope, receive, send)
+
+
+def build_math_upstream_server() -> Server:
+    server = Server("math-upstream", version="0.1.0")
+
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        return [
+            Tool(
+                name="add",
+                description="Add two integers",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"left": {"type": "integer"}, "right": {"type": "integer"}},
+                    "required": ["left", "right"],
+                },
+            )
+        ]
+
+    @server.call_tool(validate_input=False)
+    async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
+        if name != "add":
+            return CallToolResult(content=[TextContent(type="text", text=f"unknown tool: {name}")], isError=True)
+        payload = arguments or {}
+        return CallToolResult(content=[TextContent(type="text", text=str(int(payload["left"]) + int(payload["right"])))])
+
+    return server
+
+
+def build_config() -> ProxyConfig:
+    return ProxyConfig(
+        server=ServerConfig(),
+        auth=AuthConfig(
+            enabled=True,
+            issuer="https://auth.example.test/realms/example",
+            dev_bearer_tokens={
+                "admin-token": {
+                    "sub": "admin",
+                    "preferred_username": "nils.friedrichs",
+                    "groups": ["/lightnow-proxy-admins"],
+                },
+                "user-token": {
+                    "sub": "user",
+                    "preferred_username": "dorothee.warncke",
+                    "groups": ["/lightnow-proxy-users"],
+                },
+            },
+        ),
+        profiles={
+            "users": ProfileConfig(required_groups=["lightnow-proxy-users"], upstreams=["nextcloud"]),
+            "admins": ProfileConfig(required_groups=["lightnow-proxy-admins"], upstreams=["grafana", "nextcloud"]),
+        },
+        upstreams={
+            "nextcloud": UpstreamConfig(url="https://nextcloud.example.test/mcp"),
+            "grafana": UpstreamConfig(url="https://grafana.example.test/mcp"),
+        },
+    )
+
+
+def build_runtime_config() -> ProxyConfig:
+    config = build_config()
+    return ProxyConfig(
+        server=config.server,
+        auth=config.auth,
+        registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
+        profiles={
+            "admins": ProfileConfig(
+                required_groups=["lightnow-proxy-admins"],
+                runtime_upstreams=[RuntimeUpstreamConfig(name="grafana", server="grafana", version="1.0.0")],
+            )
+        },
+        upstreams={},
+    )
