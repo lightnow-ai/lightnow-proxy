@@ -7,6 +7,7 @@ import os
 from mcp.server.stdio import stdio_server
 import uvicorn
 
+from lightnow_proxy import __version__
 from lightnow_proxy.app import LocalProxyMCPApp, create_app
 from lightnow_proxy.capture import capture_enabled, capture_read_stream, initialize_capture_file, initialize_client_context
 from lightnow_proxy.config import ProxyConfig, load_config
@@ -15,6 +16,11 @@ from lightnow_proxy.router import ToolRouter
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LightNow MCP proxy")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"lightnow-proxy {__version__}",
+    )
     parser.add_argument(
         "--config",
         default=os.environ.get("LIGHTNOW_PROXY_CONFIG", "config.example.yaml"),
