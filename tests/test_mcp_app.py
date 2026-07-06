@@ -81,18 +81,18 @@ class FakeRegistryClient:
 
 
 @pytest.mark.asyncio
-async def test_healthz() -> None:
+async def test_status_endpoint_reports_static_runtime_state() -> None:
     config = build_config()
     app = create_app(config)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.get("/healthz")
+        response = await client.get("/status")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_health_endpoint_reports_active_local_proxy_profile() -> None:
+async def test_status_endpoint_can_run_active_upstream_check() -> None:
     config = ProxyConfig(
         server=ServerConfig(),
         local_proxy={"enabled": True, "profile": "default"},
@@ -104,7 +104,7 @@ async def test_health_endpoint_reports_active_local_proxy_profile() -> None:
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.get("/health")
+        response = await client.get("/status?check=upstreams")
 
     assert response.status_code == 200
     payload = response.json()

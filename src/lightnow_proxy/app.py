@@ -177,10 +177,6 @@ async def forbidden(scope: Scope, receive: Receive, send: Send) -> None:
     await response(scope, receive, send)
 
 
-async def healthz(_request: Request) -> Response:
-    return JSONResponse({"status": "ok"})
-
-
 async def status(_request: Request, config: ProxyConfig) -> Response:
     """Return non-secret Local Proxy runtime status for local health checks."""
     mode = "local_proxy" if config.local_proxy.enabled else "profile_proxy"
@@ -236,14 +232,11 @@ def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: 
         }
 
     async def status_endpoint(request: Request) -> Response:
+        if request.query_params.get("check") == "upstreams":
+            return JSONResponse(await build_health_report(config))
         return await status(request, config)
 
-    async def health_endpoint(_request: Request) -> Response:
-        return JSONResponse(await build_health_report(config))
-
     routes = [
-        Route("/healthz", healthz, methods=["GET"]),
-        Route("/health", health_endpoint, methods=["GET"]),
         Route("/status", status_endpoint, methods=["GET"]),
     ]
     if local_proxy_app is not None:

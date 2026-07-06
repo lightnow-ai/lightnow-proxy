@@ -62,7 +62,7 @@ Before publishing a release:
    pipx install lightnow-proxy
    lightnow-proxy --version
    ```
-9. Verify one local health check:
+9. Verify one local active upstream check:
    ```bash
    lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
    ```
