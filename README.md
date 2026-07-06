@@ -1,5 +1,7 @@
 # LightNow Local Proxy
 
+[![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
+
 The **LightNow Local Proxy** lets local MCP clients use one LightNow-managed
 MCP entry instead of storing every MCP server configuration and secret in every
 client.
@@ -14,7 +16,7 @@ Requirements:
 
 - Python 3.11 or higher
 - `pipx`
-- a LightNow account
+- a [LightNow account](https://www.lightnow.ai/)
 - the LightNow CLI
 
 ```sh
