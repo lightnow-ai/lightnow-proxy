@@ -294,6 +294,38 @@ async def test_health_reports_degraded_when_an_upstream_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_health_event_reports_redacted_upstream_failures() -> None:
+    from lightnow_proxy.router import ToolRouter
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    config.local_proxy.client_name = "codex"
+    config.registry_api = RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test")
+    router = ToolRouter(config, upstream_client=FailingUpstreamClient())
+    registry = FakeRuntimeEventRegistry()
+    router.registry_client = registry
+
+    report = await build_health_report(config, router)
+    await router.emit_health_event(report)
+
+    event = registry.events[0]
+    assert event["proxy_health_status"] == "degraded"
+    assert event["proxy_failed_upstreams"] == 1
+    assert event["proxy_health_failures"] == [
+        {
+            "profile": "admins",
+            "name": "grafana",
+            "transport": "streamable-http",
+            "status": "error",
+            "duration_ms": event["proxy_health_failures"][0]["duration_ms"],
+            "error_type": "TimeoutError",
+            "error_message": "upstream did not answer",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_health_unwraps_exception_groups_to_actual_cause() -> None:
     from lightnow_proxy.router import ToolRouter
 

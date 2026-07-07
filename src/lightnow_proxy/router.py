@@ -590,6 +590,7 @@ class ToolRouter:
     async def emit_health_event(self, report: dict[str, Any]) -> None:
         summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
         health_status = report.get("status") if isinstance(report.get("status"), str) else "failed"
+        failed_upstreams = proxy_health_failures(report)
         await self._emit_runtime_event(
             {
                 "profile": self.config.local_proxy.profile,
@@ -600,6 +601,7 @@ class ToolRouter:
                 "proxy_healthy_upstreams": int(summary.get("healthy_upstreams") or 0),
                 "proxy_failed_upstreams": int(summary.get("failed_upstreams") or 0),
                 "proxy_tool_count": int(summary.get("tools") or 0),
+                "proxy_health_failures": failed_upstreams or None,
             }
         )
 
@@ -745,6 +747,40 @@ def antigravity_client_context(request_meta: Mapping[str, Any]) -> dict[str, Any
     if "progressToken" in request_meta:
         metadata["client_context_metadata"]["progress_reported"] = True
     return metadata
+
+
+def proxy_health_failures(report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    profiles = report.get("profiles")
+    if not isinstance(profiles, list):
+        return failures
+
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        profile_name = profile.get("name") if isinstance(profile.get("name"), str) else None
+        upstreams = profile.get("upstreams")
+        if not isinstance(upstreams, list):
+            continue
+        for upstream in upstreams:
+            if not isinstance(upstream, Mapping) or upstream.get("status") == "healthy":
+                continue
+            name = upstream.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            failure = {
+                "profile": profile_name,
+                "name": name,
+                "transport": upstream.get("transport") if isinstance(upstream.get("transport"), str) else None,
+                "server_name": upstream.get("server_name") if isinstance(upstream.get("server_name"), str) else None,
+                "status": upstream.get("status") if isinstance(upstream.get("status"), str) else "error",
+                "duration_ms": upstream.get("duration_ms") if isinstance(upstream.get("duration_ms"), int) else None,
+                "error_type": upstream.get("error_type") if isinstance(upstream.get("error_type"), str) else None,
+                "error_message": upstream.get("error_message") if isinstance(upstream.get("error_message"), str) else None,
+            }
+            failures.append({key: value for key, value in failure.items() if value is not None})
+
+    return failures[:20]
 
 
 def resource_result_size(result: ReadResourceResult) -> int:
