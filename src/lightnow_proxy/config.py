@@ -158,7 +158,7 @@ def expand_env(value: str) -> str:
 
 
 def load_config(path: str | os.PathLike[str]) -> ProxyConfig:
-    config_path = Path(path)
+    config_path = Path(path).expanduser()
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     config = ProxyConfig.model_validate(raw)

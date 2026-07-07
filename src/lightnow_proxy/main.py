@@ -4,6 +4,7 @@ import argparse
 import anyio
 import json
 import os
+from pathlib import Path
 
 from mcp.server.stdio import stdio_server
 import uvicorn
@@ -15,6 +16,8 @@ from lightnow_proxy.config import ProxyConfig, load_config
 from lightnow_proxy.health import build_health_report, format_health_summary, health_exit_code
 from lightnow_proxy.router import ToolRouter
 
+DEFAULT_CONFIG_PATH = Path.home() / ".lightnow" / "lightnow-proxy" / "default.yaml"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LightNow MCP proxy")
@@ -25,8 +28,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        default=os.environ.get("LIGHTNOW_PROXY_CONFIG", "config.example.yaml"),
-        help="Path to the LightNow Proxy YAML config.",
+        default=os.environ.get("LIGHTNOW_PROXY_CONFIG", str(DEFAULT_CONFIG_PATH)),
+        help=f"Path to the LightNow Proxy YAML config. Defaults to {DEFAULT_CONFIG_PATH}.",
     )
     parser.add_argument(
         "--transport",
@@ -60,7 +63,11 @@ def main() -> None:
     try:
         config = load_config(config_path)
     except FileNotFoundError:
-        parser.error(f"config file not found: {config_path} (set --config or LIGHTNOW_PROXY_CONFIG)")
+        parser.error(
+            f"config file not found: {config_path} "
+            "(run `lightnow sync --client <client> --local-proxy` first, "
+            "or set --config/LIGHTNOW_PROXY_CONFIG)"
+        )
     if args.health:
         report = anyio.run(build_and_emit_health_report, config)
         if args.json:

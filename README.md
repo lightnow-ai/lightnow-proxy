@@ -78,6 +78,15 @@ Check whether the proxy can resolve the selected profile and reach its upstream
 MCP servers:
 
 ```sh
+lightnow-proxy --health
+lightnow-proxy --health --json
+```
+
+By default this reads `~/.lightnow/lightnow-proxy/default.yaml`, which is written
+when the default profile is synced into Local Proxy mode. For a client-specific
+config, pass the generated path explicitly:
+
+```sh
 lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
 lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
 ```
@@ -109,7 +118,7 @@ make test
 Run the proxy with the example config:
 
 ```sh
-LIGHTNOW_PROXY_CONFIG=config.example.yaml uv run lightnow-proxy
+uv run lightnow-proxy --config config.example.yaml
 ```
 
 Run the proxy as a stdio MCP server:

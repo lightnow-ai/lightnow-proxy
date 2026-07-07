@@ -125,7 +125,7 @@ Manual release checklist for fallback or first-time setup:
    ```
 10. Verify one local active upstream check:
    ```bash
-   lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
+   lightnow-proxy --health --json
    ```
 11. Verify at least one real Local Proxy sync and MCP call with the current
     LightNow CLI against the local or production Registry API.
