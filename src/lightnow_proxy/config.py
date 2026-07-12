@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 import yaml
@@ -125,11 +127,56 @@ class RegistryApiConfig(BaseModel):
         return os.path.expanduser(expand_env(self.ca_file))
 
 
+class RuntimeSecretProviderConfig(BaseModel):
+    auth_mode: Literal["vault-proxy", "keyring"] = "vault-proxy"
+    vault_proxy_url: str = "http://127.0.0.1:8200"
+    address_override: str | None = None
+    ca_file: str | None = None
+    keyring_service: str = "lightnow-proxy-vault"
+    timeout_seconds: float = 10.0
+
+    @field_validator("vault_proxy_url")
+    @classmethod
+    def vault_proxy_must_be_local(cls, value: str) -> str:
+        parsed = urlparse(value)
+        host = parsed.hostname
+        if parsed.scheme not in {"http", "https"} or host is None:
+            raise ValueError("vault_proxy_url must be an HTTP(S) origin")
+        is_loopback = host == "localhost"
+        try:
+            is_loopback = is_loopback or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            pass
+        if not is_loopback:
+            raise ValueError("vault_proxy_url must target a loopback address")
+        return value.rstrip("/")
+
+    @field_validator("address_override")
+    @classmethod
+    def direct_vault_address_must_use_https(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.hostname is None:
+            raise ValueError("address_override must be an HTTPS origin")
+        return value.rstrip("/")
+
+    def resolved_ca_file(self) -> str | None:
+        if self.ca_file is None:
+            return None
+        return os.path.expanduser(expand_env(self.ca_file))
+
+
+class RuntimeSecretsConfig(BaseModel):
+    providers: dict[str, RuntimeSecretProviderConfig] = Field(default_factory=dict)
+
+
 class ProxyConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     local_proxy: LocalProxyConfig = Field(default_factory=LocalProxyConfig)
     auth: AuthConfig
     registry_api: RegistryApiConfig | None = None
+    runtime_secrets: RuntimeSecretsConfig = Field(default_factory=RuntimeSecretsConfig)
     profiles: dict[str, ProfileConfig]
     upstreams: dict[str, UpstreamConfig]
 
