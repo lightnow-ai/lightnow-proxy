@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from lightnow_proxy.auth import Principal
 from lightnow_proxy.config import RegistryApiConfig, RuntimeUpstreamConfig, UpstreamConfig
+from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 
 
 class RegistryApiError(Exception):
@@ -151,8 +152,9 @@ async def refresh_cli_session(
 
 
 class RegistryApiClient:
-    def __init__(self, config: RegistryApiConfig):
+    def __init__(self, config: RegistryApiConfig, runtime_secret_resolver: RuntimeSecretResolver | None = None):
         self.config = config
+        self.runtime_secret_resolver = runtime_secret_resolver
         self._access_token: str | None = None
         self._tenant_id: str | None = None
 
@@ -370,6 +372,8 @@ class RegistryApiClient:
         principal: Principal | None,
     ) -> ResolvedRuntimeUpstream:
         context = await self.fetch_runtime_context(upstream, principal)
+        if self.runtime_secret_resolver is not None:
+            context = await self.runtime_secret_resolver.resolve_context(context)
         try:
             return ResolvedRuntimeUpstream(
                 name=upstream.name,

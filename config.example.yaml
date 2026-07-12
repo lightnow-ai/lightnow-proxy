@@ -33,6 +33,15 @@ registry_api:
   default_scope_type: "system"
   timeout_seconds: 20
 
+# Optional local mappings for providers configured with resolution_mode=runtime.
+# Credentials are not stored in this file. HashiCorp Vault Proxy auto-auth is
+# used by default; install lightnow-proxy[keyring] for auth_mode=keyring.
+runtime_secrets:
+  providers:
+    # "provider-uuid":
+    #   auth_mode: "vault-proxy"
+    #   vault_proxy_url: "http://127.0.0.1:8200"
+
 profiles:
   default:
     upstreams:
