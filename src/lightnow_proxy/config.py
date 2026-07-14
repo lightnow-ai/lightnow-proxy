@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 import yaml
@@ -32,6 +33,10 @@ class LocalProxyConfig(BaseModel):
     tool_cache_enabled: bool = True
     tool_cache_ttl_seconds: int = 300
     tool_cache_path: str | None = None
+    device_installation_id: UUID | None = None
+    client_instance_id: UUID | None = None
+    device_hostname: str | None = None
+    device_platform: Literal["macos", "windows", "linux", "unknown"] = "unknown"
 
     @field_validator("path")
     @classmethod

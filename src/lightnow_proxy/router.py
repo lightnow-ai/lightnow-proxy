@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
 import logging
 from pathlib import Path
@@ -20,6 +21,7 @@ from lightnow_proxy.request_context import get_current_principal
 from lightnow_proxy.upstream import UpstreamMCPClient
 
 logger = logging.getLogger(__name__)
+DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
 
 
 class ToolRoutingError(Exception):
@@ -84,8 +86,13 @@ class ToolRouter:
     def __init__(self, config: ProxyConfig, upstream_client: UpstreamMCPClient | None = None):
         self.config = config
         self.upstream_client = upstream_client or UpstreamMCPClient()
-        self.registry_client = RegistryApiClient(config.registry_api) if config.registry_api and config.registry_api.enabled else None
+        self.registry_client = (
+            RegistryApiClient(config.registry_api) if config.registry_api and config.registry_api.enabled else None
+        )
         self.client_context = ClientRuntimeContext()
+        self.device_heartbeat_last_attempt_at: datetime | None = None
+        self.device_heartbeat_last_success_at: datetime | None = None
+        self.device_heartbeat_last_error: str | None = None
 
     def update_client_context(
         self,
@@ -169,7 +176,9 @@ class ToolRouter:
             )
             raise
 
-    async def _list_upstream_tools(self, upstream_name: str, config: UpstreamConfig) -> tuple[str, list[Tool], Exception | None]:
+    async def _list_upstream_tools(
+        self, upstream_name: str, config: UpstreamConfig
+    ) -> tuple[str, list[Tool], Exception | None]:
         try:
             return upstream_name, await self.upstream_client.list_tools(config), None
         except Exception as exc:
@@ -178,10 +187,7 @@ class ToolRouter:
     async def profile_upstream_health(self, profile_name: str) -> list[UpstreamHealth]:
         upstreams = await self._profile_upstream_details(profile_name)
         results = await asyncio.gather(
-            *[
-                self._measure_upstream_health(upstream_name, upstream)
-                for upstream_name, upstream in upstreams.items()
-            ]
+            *[self._measure_upstream_health(upstream_name, upstream) for upstream_name, upstream in upstreams.items()]
         )
         return sorted(results, key=lambda item: item.name)
 
@@ -366,7 +372,9 @@ class ToolRouter:
                     upstream_templates = await self.upstream_client.list_resource_templates(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
-                    logger.warning("failed to list resource templates for upstream %s: %s", upstream_name, unwrap_error(exc))
+                    logger.warning(
+                        "failed to list resource templates for upstream %s: %s", upstream_name, unwrap_error(exc)
+                    )
                     continue
                 for template in upstream_templates:
                     templates.append(prefix_resource_template(upstream_name, template))
@@ -460,7 +468,9 @@ class ToolRouter:
         except KeyError as exc:
             raise ToolRoutingError(f"unknown profile: {profile_name}") from exc
 
-    async def _call_target(self, profile_name: str, proxied_tool_name: str) -> tuple[RoutedTool, ProfileUpstream | None]:
+    async def _call_target(
+        self, profile_name: str, proxied_tool_name: str
+    ) -> tuple[RoutedTool, ProfileUpstream | None]:
         profile = self._profile(profile_name)
         upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
 
@@ -496,7 +506,9 @@ class ToolRouter:
         return routed, None
 
     async def _profile_upstreams(self, profile_name: str) -> dict[str, UpstreamConfig]:
-        return {name: upstream.config for name, upstream in (await self._profile_upstream_details(profile_name)).items()}
+        return {
+            name: upstream.config for name, upstream in (await self._profile_upstream_details(profile_name)).items()
+        }
 
     async def _profile_upstream_details(self, profile_name: str) -> dict[str, ProfileUpstream]:
         profile = self._profile(profile_name)
@@ -569,6 +581,12 @@ class ToolRouter:
                 "client_transport": self.config.local_proxy.client_transport,
                 "local_proxy_policy_mode": self.config.local_proxy.policy_mode,
                 "local_proxy_allow_unmanaged_client_servers": self.config.local_proxy.allow_unmanaged_client_servers,
+                "device_installation_id": str(self.config.local_proxy.device_installation_id)
+                if self.config.local_proxy.device_installation_id
+                else None,
+                "client_instance_id": str(self.config.local_proxy.client_instance_id)
+                if self.config.local_proxy.client_instance_id
+                else None,
                 "mcp_method": mcp_method_for_event(str(payload.get("event_type", ""))),
             }.items()
             if value is not None
@@ -577,6 +595,72 @@ class ToolRouter:
             await self.registry_client.post_runtime_event(event)
         except Exception as exc:  # pragma: no cover - defensive logging only
             logger.warning("failed to post LightNow MCP runtime event: %s", exc)
+
+    def device_heartbeat_enabled(self) -> bool:
+        """Return whether this observed Local Proxy has enough data to report presence."""
+        return bool(
+            self.config.local_proxy.enabled
+            and self.config.local_proxy.telemetry_enabled
+            and self.registry_client is not None
+            and self.config.local_proxy.device_installation_id
+            and self.config.local_proxy.client_instance_id
+            and self.config.local_proxy.device_hostname
+        )
+
+    async def send_device_heartbeat(self) -> bool:
+        """Send one best-effort heartbeat without affecting MCP traffic."""
+        if not self.device_heartbeat_enabled() or self.registry_client is None:
+            return False
+        local_proxy = self.config.local_proxy
+        self.device_heartbeat_last_attempt_at = datetime.now(UTC)
+        payload = {
+            "device": {
+                "reported_hostname": local_proxy.device_hostname,
+                "platform": local_proxy.device_platform,
+            },
+            "client": {
+                "name": self.client_context.name or local_proxy.client_name,
+                "version": self.client_context.version or local_proxy.client_version,
+                "profile": local_proxy.profile,
+                "runner_name": local_proxy.runner_name,
+                "runner_version": __version__,
+                "transport": local_proxy.client_transport,
+            },
+        }
+        try:
+            await self.registry_client.post_device_heartbeat(
+                str(local_proxy.device_installation_id),
+                str(local_proxy.client_instance_id),
+                payload,
+            )
+        except Exception as exc:
+            self.device_heartbeat_last_error = error_message(exc)
+            logger.warning("failed to post LightNow device heartbeat: %s", exc)
+            return False
+
+        self.device_heartbeat_last_success_at = datetime.now(UTC)
+        self.device_heartbeat_last_error = None
+        return True
+
+    async def run_device_heartbeat_loop(self) -> None:
+        """Send immediately, then let each regular interval serve as the only retry."""
+        while True:
+            await self.send_device_heartbeat()
+            await asyncio.sleep(DEVICE_HEARTBEAT_INTERVAL_SECONDS)
+
+    def device_heartbeat_status(self) -> dict[str, Any]:
+        """Return non-secret local diagnostics for the last heartbeat attempt."""
+        return {
+            "enabled": self.device_heartbeat_enabled(),
+            "interval_seconds": DEVICE_HEARTBEAT_INTERVAL_SECONDS,
+            "last_attempt_at": self.device_heartbeat_last_attempt_at.isoformat()
+            if self.device_heartbeat_last_attempt_at
+            else None,
+            "last_success_at": self.device_heartbeat_last_success_at.isoformat()
+            if self.device_heartbeat_last_success_at
+            else None,
+            "last_error": self.device_heartbeat_last_error,
+        }
 
     async def emit_lifecycle_event(self, event_type: str, status: str = "success") -> None:
         await self._emit_runtime_event(
@@ -596,7 +680,9 @@ class ToolRouter:
                 "profile": self.config.local_proxy.profile,
                 "event_type": "proxy_health",
                 "status": "success" if health_status == "healthy" else "error",
-                "proxy_health_status": health_status if health_status in {"healthy", "degraded", "failed"} else "failed",
+                "proxy_health_status": health_status
+                if health_status in {"healthy", "degraded", "failed"}
+                else "failed",
                 "proxy_upstreams": int(summary.get("upstreams") or 0),
                 "proxy_healthy_upstreams": int(summary.get("healthy_upstreams") or 0),
                 "proxy_failed_upstreams": int(summary.get("failed_upstreams") or 0),
@@ -776,7 +862,9 @@ def proxy_health_failures(report: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "status": upstream.get("status") if isinstance(upstream.get("status"), str) else "error",
                 "duration_ms": upstream.get("duration_ms") if isinstance(upstream.get("duration_ms"), int) else None,
                 "error_type": upstream.get("error_type") if isinstance(upstream.get("error_type"), str) else None,
-                "error_message": upstream.get("error_message") if isinstance(upstream.get("error_message"), str) else None,
+                "error_message": upstream.get("error_message")
+                if isinstance(upstream.get("error_message"), str)
+                else None,
             }
             failures.append({key: value for key, value in failure.items() if value is not None})
 

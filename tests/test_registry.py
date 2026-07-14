@@ -264,9 +264,7 @@ async def test_registry_client_fetches_mixed_profile_upstreams(tmp_path) -> None
     )
 
     with respx.mock(assert_all_called=True) as router:
-        router.get(
-            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
-        ).respond(
+        router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
             200,
             json={
                 "servers": [
@@ -337,9 +335,7 @@ async def test_registry_client_fetches_profile_names_without_secrets(tmp_path) -
     )
 
     with respx.mock(assert_all_called=True) as router:
-        route = router.get(
-            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
-        ).respond(
+        route = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
             200,
             json={
                 "servers": [
@@ -377,9 +373,7 @@ async def test_registry_client_fetches_one_profile_upstream_with_secrets(tmp_pat
     )
 
     with respx.mock(assert_all_called=True) as router:
-        route = router.get(
-            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
-        ).respond(
+        route = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
             200,
             json={
                 "servers": [
@@ -441,9 +435,9 @@ async def test_registry_client_prefers_configured_tenant_over_cli_context(tmp_pa
     )
 
     with respx.mock(assert_all_called=True) as router:
-        route = router.get(
-            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
-        ).respond(200, json={"servers": []})
+        route = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200, json={"servers": []}
+        )
 
         await client.fetch_profile_runtime_upstreams("default")
 
@@ -490,6 +484,49 @@ async def test_registry_client_posts_runtime_events_with_cli_session(tmp_path) -
 
     assert route.calls.last.request.headers["Authorization"].startswith("Bearer ")
     assert route.calls.last.request.headers["X-Tenant"] == "tenant-uuid"
+    assert json.loads(route.calls.last.request.content) == payload
+
+
+@pytest.mark.asyncio
+async def test_registry_client_posts_device_heartbeat_with_cli_session(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) + 3600),
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local/v0.1",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        )
+    )
+    payload = {
+        "device": {"reported_hostname": "mac-01", "platform": "macos"},
+        "client": {"name": "codex", "profile": "default"},
+    }
+    url = (
+        "https://registry-api.lightnow.local/v0.1/integrations/devices/"
+        "11111111-1111-4111-8111-111111111111/clients/"
+        "22222222-2222-4222-8222-222222222222/heartbeat"
+    )
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(url).respond(200, json={"heartbeat_interval_seconds": 120})
+        result = await client.post_device_heartbeat(
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            payload,
+        )
+
+    assert result["heartbeat_interval_seconds"] == 120
+    assert route.calls.last.request.headers["Authorization"].startswith("Bearer ")
     assert json.loads(route.calls.last.request.content) == payload
 
 
