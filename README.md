@@ -98,6 +98,15 @@ then show which devices, clients and profiles are active, healthy, degraded, or
 failing without storing secrets, tool arguments, response bodies, network
 addresses, hardware identifiers, or local paths.
 
+Vault providers configured for runtime resolution are resolved on this host,
+after Registry API has returned a provider reference without credentials or a
+secret value. HashiCorp Vault Proxy auto-auth on `127.0.0.1:8200` is the
+default. Provider-specific loopback listeners can be mapped under
+`runtime_secrets.providers` in the generated YAML; LightNow CLI preserves these
+non-secret mappings on subsequent syncs. The optional OS-keyring path is
+available with `lightnow-proxy[keyring]`. Resolution failures are fail-closed
+and plaintext values are never added to the tool-schema cache.
+
 ## More Documentation
 
 Detailed setup guides, examples, diagrams, supported client paths, telemetry

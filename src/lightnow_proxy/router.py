@@ -17,6 +17,7 @@ from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemp
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.registry import RegistryApiClient
+from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_principal
 from lightnow_proxy.upstream import UpstreamMCPClient
 
@@ -87,7 +88,9 @@ class ToolRouter:
         self.config = config
         self.upstream_client = upstream_client or UpstreamMCPClient()
         self.registry_client = (
-            RegistryApiClient(config.registry_api) if config.registry_api and config.registry_api.enabled else None
+            RegistryApiClient(config.registry_api, RuntimeSecretResolver(config.runtime_secrets))
+            if config.registry_api and config.registry_api.enabled
+            else None
         )
         self.client_context = ClientRuntimeContext()
         self.device_heartbeat_last_attempt_at: datetime | None = None

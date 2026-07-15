@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from lightnow_proxy.config import RegistryApiConfig, RuntimeUpstreamConfig
+from lightnow_proxy.config import RegistryApiConfig, RuntimeSecretsConfig, RuntimeUpstreamConfig
 from lightnow_proxy.registry import (
     CliSession,
     RegistryApiClient,
@@ -15,6 +15,7 @@ from lightnow_proxy.registry import (
     upstream_config_from_client_config,
     upstream_config_from_runtime_context,
 )
+from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 
 
 def test_runtime_http_context_becomes_streamable_http_upstream() -> None:
@@ -579,6 +580,64 @@ async def test_registry_client_resolves_runtime_context_with_local_runner_consum
     assert "scopeType" not in route.calls.last.request.url.params
     assert resolved.name == "release-smoke"
     assert resolved.config.transport == "stdio"
+
+
+@pytest.mark.asyncio
+async def test_registry_client_resolves_external_bindings_before_building_upstream(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) + 3600),
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        ),
+        RuntimeSecretResolver(RuntimeSecretsConfig()),
+    )
+    upstream = RuntimeUpstreamConfig(
+        name="release-smoke",
+        server="codex-test1.lightnow/release-smoke",
+        version="1.0.1",
+    )
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get(
+            "https://registry-api.lightnow.local/v0.1/servers/codex-test1.lightnow%2Frelease-smoke/versions/1.0.1/context"
+        ).respond(
+            200,
+            json={
+                "probe_request": {"transport": "stdio", "stdio": {"cmd": "npx", "args": []}},
+                "external_secret_bindings": [
+                    {
+                        "provider": {
+                            "id": "provider-uuid",
+                            "provider_type": "vault_kv_v2",
+                            "resolution_mode": "runtime",
+                            "config": {"address": "https://vault.internal"},
+                        },
+                        "locator": {"path": "secret/data/lightnow/test", "field": "token"},
+                        "target": {"type": "env", "name": "API_TOKEN"},
+                    }
+                ],
+            },
+        )
+        router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/test").respond(
+            200, json={"data": {"data": {"token": "runtime-value"}}}
+        )
+
+        resolved = await client.resolve_upstream(upstream, None)
+
+    assert resolved.config.env == {"API_TOKEN": "runtime-value"}
 
 
 @pytest.mark.asyncio
