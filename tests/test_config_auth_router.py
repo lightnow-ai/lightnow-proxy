@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import time
 
 import jwt
@@ -19,6 +20,7 @@ from lightnow_proxy.config import (
     RuntimeUpstreamConfig,
     ServerConfig,
     UpstreamConfig,
+    load_config,
 )
 from lightnow_proxy.router import ToolRouter, prefix_resource, prefix_tool, route_resource, runtime_request_metadata
 
@@ -48,6 +50,13 @@ def test_configured_audiences_normalizes_string_and_list() -> None:
     assert configured_audiences(None) == []
     assert configured_audiences("lightnow-proxy") == ["lightnow-proxy"]
     assert configured_audiences(["legacy-client", "lightnow-proxy"]) == ["legacy-client", "lightnow-proxy"]
+
+
+def test_example_config_loads() -> None:
+    config = load_config(Path(__file__).parents[1] / "config.example.yaml")
+
+    assert config.local_proxy.enabled is True
+    assert config.runtime_secrets.providers == {}
 
 
 def test_token_verifier_accepts_keycloak_authorized_party_without_audience() -> None:

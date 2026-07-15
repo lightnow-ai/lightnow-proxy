@@ -91,10 +91,12 @@ lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
 lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
 ```
 
-When telemetry is enabled, active health checks are also sent to LightNow
-Insights as metadata-only proxy health events. The Insights page can then show
-which clients and profiles are healthy, degraded, or failing without storing
-secrets, tool arguments, or response bodies.
+When telemetry is enabled, active health checks are sent to the LightNow
+Control Plane as metadata-only proxy health events. The proxy also sends device
+presence immediately at startup and every two minutes. The Control Plane can
+then show which devices, clients and profiles are active, healthy, degraded, or
+failing without storing secrets, tool arguments, response bodies, network
+addresses, hardware identifiers, or local paths.
 
 Vault providers configured for runtime resolution are resolved on this host,
 after Registry API has returned a provider reference without credentials or a

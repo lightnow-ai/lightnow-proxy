@@ -309,6 +309,23 @@ class RegistryApiClient:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
 
+    async def post_device_heartbeat(
+        self,
+        installation_id: str,
+        client_instance_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Post one observed device heartbeat using the current CLI scope."""
+        headers = await self._authorization_headers()
+        url = self._api_url(f"/integrations/devices/{installation_id}/clients/{client_instance_id}/heartbeat")
+        async with self._http_client() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+        if not isinstance(result, dict):
+            raise RegistryApiError("Registry device heartbeat response must be a JSON object")
+        return result
+
     async def _fetch_profile_servers(self, profile_name: str, include_secrets: bool) -> dict[str, Any]:
         headers = await self._authorization_headers()
         url = self._api_url(f"/integrations/profiles/{profile_name}/servers")

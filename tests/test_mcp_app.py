@@ -6,6 +6,7 @@ from datetime import timedelta
 import socket
 import sys
 from typing import Any, AsyncIterator
+from unittest.mock import patch
 
 import httpx
 from mcp import ClientSession
@@ -132,6 +133,8 @@ async def test_status_endpoint_emits_proxy_health_event_for_active_checks() -> N
             "client_transport": "stdio",
             "policy_mode": "enforce",
             "allow_unmanaged_client_servers": False,
+            "device_installation_id": "11111111-1111-4111-8111-111111111111",
+            "client_instance_id": "22222222-2222-4222-8222-222222222222",
         },
         auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
         registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
@@ -208,6 +211,99 @@ async def test_status_reports_non_secret_local_proxy_runtime_state() -> None:
     assert payload["static_upstreams"] == ["grafana", "nextcloud"]
     assert "token" not in str(payload).lower()
     assert "secret" not in str(payload).lower()
+
+
+@pytest.mark.asyncio
+async def test_device_heartbeat_loop_sends_immediately_then_waits_two_minutes() -> None:
+    """Presence starts immediately and the regular interval is the only retry loop."""
+
+    class StopHeartbeatLoop(Exception):
+        pass
+
+    class FakeRuntimeRegistry:
+        def __init__(self) -> None:
+            self.heartbeats: list[tuple[str, str, dict[str, Any]]] = []
+
+        async def post_device_heartbeat(
+            self,
+            installation_id: str,
+            client_instance_id: str,
+            payload: dict[str, Any],
+        ) -> dict[str, Any]:
+            self.heartbeats.append((installation_id, client_instance_id, payload))
+            return {"heartbeat_interval_seconds": 120}
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "research"
+    config.local_proxy.client_name = "codex"
+    config.local_proxy.client_transport = "stdio"
+    config.local_proxy.device_installation_id = "11111111-1111-4111-8111-111111111111"
+    config.local_proxy.client_instance_id = "22222222-2222-4222-8222-222222222222"
+    config.local_proxy.device_hostname = "mac-01"
+    config.local_proxy.device_platform = "macos"
+
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config)
+    registry = FakeRuntimeRegistry()
+    router.registry_client = registry
+    with patch("lightnow_proxy.router.asyncio.sleep", side_effect=StopHeartbeatLoop) as sleep:
+        with pytest.raises(StopHeartbeatLoop):
+            await router.run_device_heartbeat_loop()
+
+    assert sleep.call_args.args == (120,)
+    assert len(registry.heartbeats) == 1
+    installation_id, client_instance_id, payload = registry.heartbeats[0]
+    assert installation_id == "11111111-1111-4111-8111-111111111111"
+    assert client_instance_id == "22222222-2222-4222-8222-222222222222"
+    assert payload["device"] == {
+        "reported_hostname": "mac-01",
+        "platform": "macos",
+    }
+    assert payload["client"]["profile"] == "research"
+    assert payload["client"]["runner_version"] == __version__
+    assert router.device_heartbeat_status()["last_success_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_device_heartbeat_failure_is_diagnostic_and_does_not_raise() -> None:
+    """Heartbeat failures remain local diagnostics and never block MCP operations."""
+
+    class FailingRegistry:
+        async def post_device_heartbeat(self, *_args, **_kwargs):
+            raise httpx.ConnectError("registry unavailable")
+
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.device_installation_id = "11111111-1111-4111-8111-111111111111"
+    config.local_proxy.client_instance_id = "22222222-2222-4222-8222-222222222222"
+    config.local_proxy.device_hostname = "pc-4711"
+
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config, upstream_client=FakeUpstreamClient())
+    router.registry_client = FailingRegistry()
+
+    assert await router.send_device_heartbeat() is False
+    assert router.device_heartbeat_status()["last_error"] == "registry unavailable"
+    assert await router.list_tools("admins")
+
+
+@pytest.mark.asyncio
+async def test_device_heartbeat_is_disabled_with_runtime_telemetry() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.telemetry_enabled = False
+    config.local_proxy.device_installation_id = "11111111-1111-4111-8111-111111111111"
+    config.local_proxy.client_instance_id = "22222222-2222-4222-8222-222222222222"
+    config.local_proxy.device_hostname = "mac-02"
+
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config)
+    assert router.device_heartbeat_enabled() is False
+    assert await router.send_device_heartbeat() is False
 
 
 @pytest.mark.asyncio
@@ -370,6 +466,8 @@ async def test_local_proxy_lifespan_emits_runner_lifecycle_events() -> None:
             "client_transport": "stdio",
             "policy_mode": "enforce",
             "allow_unmanaged_client_servers": False,
+            "device_installation_id": "11111111-1111-4111-8111-111111111111",
+            "client_instance_id": "22222222-2222-4222-8222-222222222222",
         },
         auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
         registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
@@ -398,6 +496,8 @@ async def test_local_proxy_lifespan_emits_runner_lifecycle_events() -> None:
     assert registry.events[0]["runner_version"] == __version__
     assert registry.events[0]["local_proxy_policy_mode"] == "enforce"
     assert registry.events[0]["local_proxy_allow_unmanaged_client_servers"] is False
+    assert registry.events[0]["device_installation_id"] == "11111111-1111-4111-8111-111111111111"
+    assert registry.events[0]["client_instance_id"] == "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.mark.asyncio
@@ -459,7 +559,7 @@ async def test_mcp_profile_lists_and_calls_prefixed_tools() -> None:
                     names = {tool.name for tool in tools.tools}
                     assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
 
-                    result = await session.call_tool("grafana__query_loki_logs", arguments={"logql": "{job=\"x\"}"})
+                    result = await session.call_tool("grafana__query_loki_logs", arguments={"logql": '{job="x"}'})
                     assert result.isError is False
                     assert "grafana.example.test:query_loki_logs" in result.content[0].text
 
@@ -915,7 +1015,9 @@ def build_math_upstream_server() -> Server:
         if name != "add":
             return CallToolResult(content=[TextContent(type="text", text=f"unknown tool: {name}")], isError=True)
         payload = arguments or {}
-        return CallToolResult(content=[TextContent(type="text", text=str(int(payload["left"]) + int(payload["right"])))])
+        return CallToolResult(
+            content=[TextContent(type="text", text=str(int(payload["left"]) + int(payload["right"])))]
+        )
 
     return server
 

@@ -11,7 +11,12 @@ import uvicorn
 
 from lightnow_proxy import __version__
 from lightnow_proxy.app import LocalProxyMCPApp, create_app
-from lightnow_proxy.capture import capture_enabled, capture_read_stream, initialize_capture_file, initialize_client_context
+from lightnow_proxy.capture import (
+    capture_enabled,
+    capture_read_stream,
+    initialize_capture_file,
+    initialize_client_context,
+)
 from lightnow_proxy.config import ProxyConfig, load_config
 from lightnow_proxy.health import build_health_report, format_health_summary, health_exit_code
 from lightnow_proxy.router import ToolRouter
@@ -128,6 +133,8 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
         )
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(forward_messages)
+            if router.device_heartbeat_enabled():
+                task_group.start_soon(router.run_device_heartbeat_loop)
             await router.emit_lifecycle_event("runner_started")
             try:
                 await server.run(
@@ -138,6 +145,7 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
                 )
             finally:
                 await router.emit_lifecycle_event("runner_stopped")
+                task_group.cancel_scope.cancel()
 
 
 if __name__ == "__main__":

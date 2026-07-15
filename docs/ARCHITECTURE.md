@@ -95,6 +95,13 @@ Runtime telemetry is metadata-only. The proxy emits events for:
 - `resources/read`
 - `resources/templates/list`
 
+When a CLI-generated Local Proxy configuration includes stable device and
+client-instance UUIDs, the proxy also sends one presence heartbeat at startup
+and every 120 seconds. The Registry API computes active presence with a
+300-second threshold. Heartbeat failures are logged and exposed through local
+status, but never block MCP traffic; the next regular heartbeat is the only
+retry. Disabling runtime telemetry disables both events and presence.
+
 Events identify both the MCP end-client (`mcp_client_name`, for example
 `codex`) and the local process (`runner_name`, for example
 `lightnow-local-proxy`). This distinction matters because the runner is the

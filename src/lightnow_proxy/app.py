@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack, asynccontextmanager
+import asyncio
+from contextlib import suppress
 from ipaddress import ip_address
 import logging
 from typing import Any, AsyncIterator
@@ -255,7 +257,7 @@ async def forbidden(scope: Scope, receive: Receive, send: Send) -> None:
     await response(scope, receive, send)
 
 
-async def status(_request: Request, config: ProxyConfig) -> Response:
+async def status(_request: Request, config: ProxyConfig, router: ToolRouter) -> Response:
     """Return non-secret Local Proxy runtime status for local health checks."""
     mode = "local_proxy" if config.local_proxy.enabled else "profile_proxy"
     return JSONResponse(
@@ -277,6 +279,7 @@ async def status(_request: Request, config: ProxyConfig) -> Response:
                 "telemetry_enabled": config.local_proxy.telemetry_enabled,
                 "policy_mode": config.local_proxy.policy_mode,
                 "allow_unmanaged_client_servers": config.local_proxy.allow_unmanaged_client_servers,
+                "device_heartbeat": device_heartbeat_status(router),
             },
             "registry_api": {
                 "enabled": bool(config.registry_api and config.registry_api.enabled),
@@ -288,7 +291,9 @@ async def status(_request: Request, config: ProxyConfig) -> Response:
     )
 
 
-def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: TokenVerifier | None = None) -> Starlette:
+def create_app(
+    config: ProxyConfig, router: ToolRouter | None = None, verifier: TokenVerifier | None = None
+) -> Starlette:
     logging.basicConfig(level=logging.INFO)
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -314,7 +319,7 @@ def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: 
             report = await build_health_report(config, router=router)
             await router.emit_health_event(report)
             return JSONResponse(report)
-        return await status(request, config)
+        return await status(request, config, router)
 
     routes = [
         Route("/status", status_endpoint, methods=["GET"]),
@@ -327,9 +332,15 @@ def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
+            heartbeat_task: asyncio.Task[None] | None = None
             if local_proxy_app is not None:
                 await stack.enter_async_context(local_proxy_app.session_manager.run())
                 await emit_lifecycle_event(router, "runner_started")
+                if device_heartbeat_enabled(router):
+                    heartbeat_task = asyncio.create_task(
+                        router.run_device_heartbeat_loop(),
+                        name="lightnow-device-heartbeat",
+                    )
             for profile_app in profile_apps.values():
                 await stack.enter_async_context(profile_app.session_manager.run())
             try:
@@ -337,6 +348,10 @@ def create_app(config: ProxyConfig, router: ToolRouter | None = None, verifier: 
             finally:
                 if local_proxy_app is not None:
                     await emit_lifecycle_event(router, "runner_stopped")
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await heartbeat_task
 
     return Starlette(routes=routes, lifespan=lifespan)
 
@@ -347,9 +362,29 @@ async def emit_lifecycle_event(router: Any, event_type: str) -> None:
         await emitter(event_type)
 
 
+def device_heartbeat_enabled(router: Any) -> bool:
+    checker = getattr(router, "device_heartbeat_enabled", None)
+    return bool(checker()) if checker is not None else False
+
+
+def device_heartbeat_status(router: Any) -> dict[str, Any]:
+    reporter = getattr(router, "device_heartbeat_status", None)
+    if reporter is not None:
+        return reporter()
+    return {
+        "enabled": False,
+        "interval_seconds": 120,
+        "last_attempt_at": None,
+        "last_success_at": None,
+        "last_error": None,
+    }
+
+
 def register_unvalidated_call_tool_handler(server: Server, handler_func) -> None:
     async def handler(req: types.CallToolRequest):
-        request_meta = req.params.meta.model_dump(mode="json", by_alias=True, exclude_none=True) if req.params.meta else None
+        request_meta = (
+            req.params.meta.model_dump(mode="json", by_alias=True, exclude_none=True) if req.params.meta else None
+        )
         result = await handler_func(req.params.name, req.params.arguments or {}, request_meta)
         return types.ServerResult(result)
 
