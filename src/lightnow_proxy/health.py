@@ -69,7 +69,12 @@ async def build_health_report(config: ProxyConfig, router: ToolRouter | None = N
         "mode": mode,
         "local_proxy": {
             "enabled": config.local_proxy.enabled,
+            "connection_id": str(config.local_proxy.connection_id) if config.local_proxy.connection_id else None,
+            "connection_alias": config.local_proxy.connection_alias,
             "profile": config.local_proxy.profile if config.local_proxy.enabled else None,
+            "scope_type": config.local_proxy.scope_type,
+            "scope_id": config.local_proxy.scope_id,
+            "account_label": config.local_proxy.account_label,
             "path": config.local_proxy.path if config.local_proxy.enabled else None,
             "client_name": config.local_proxy.client_name,
             "client_version": config.local_proxy.client_version,
@@ -81,6 +86,9 @@ async def build_health_report(config: ProxyConfig, router: ToolRouter | None = N
         "registry_api": {
             "enabled": bool(config.registry_api and config.registry_api.enabled),
             "use_cli_session": bool(config.registry_api and config.registry_api.use_cli_session),
+            "bound_session": bool(config.registry_api and config.registry_api.cli_session_path),
+            "expected_issuer": config.registry_api.expected_issuer if config.registry_api else None,
+            "expected_subject": config.registry_api.expected_subject if config.registry_api else None,
         },
         "summary": {
             "profiles": len(profiles),

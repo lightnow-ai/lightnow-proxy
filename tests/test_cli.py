@@ -54,6 +54,56 @@ upstreams: {}
     assert '"warning": "profile has no upstream MCP servers"' in result.stdout
 
 
+def test_health_reports_non_secret_connection_binding(tmp_path) -> None:
+    config_path = tmp_path / "proxy.yaml"
+    config_path.write_text(
+        """
+auth:
+  enabled: false
+  issuer: https://auth.example.test/realms/example
+local_proxy:
+  enabled: true
+  connection_id: 10d45f35-3143-482b-bda2-7f3931667049
+  connection_alias: lightnow-acme
+  account_label: Developer
+  scope_type: tenant
+  scope_id: tenant-1
+  profile: engineering
+registry_api:
+  enabled: false
+  base_url: https://registry.example.test
+  cli_session_path: /tmp/session.json
+  expected_issuer: https://auth.example.test/realms/example
+  expected_subject: user-1
+profiles:
+  engineering: {}
+upstreams: {}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lightnow_proxy.main",
+            "--config",
+            str(config_path),
+            "--health",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert '"connection_alias": "lightnow-acme"' in result.stdout
+    assert '"account_label": "Developer"' in result.stdout
+    assert '"scope_type": "tenant"' in result.stdout
+    assert '"expected_subject": "user-1"' in result.stdout
+    assert "session.json" not in result.stdout
+
+
 def test_health_flag_uses_default_user_config_path(tmp_path) -> None:
     home = tmp_path / "home"
     config_path = home / ".lightnow" / "lightnow-proxy" / "default.yaml"

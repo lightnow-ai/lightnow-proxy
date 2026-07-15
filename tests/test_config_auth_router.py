@@ -124,6 +124,33 @@ def test_config_rejects_unknown_profile_upstream() -> None:
         config.validate_references()
 
 
+def test_legacy_cli_session_config_is_bound_to_proxy_issuer() -> None:
+    issuer = "https://auth.example.test/realms/example"
+    config = ProxyConfig(
+        auth=AuthConfig(enabled=False, issuer=issuer),
+        registry_api=RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry.example.test",
+            use_cli_session=True,
+        ),
+        profiles={"default": ProfileConfig()},
+        upstreams={},
+    )
+
+    assert config.registry_api is not None
+    assert config.registry_api.expected_issuer == issuer
+
+
+def test_named_cli_session_requires_identity_guardrails() -> None:
+    with pytest.raises(ValueError, match="cli_session_path requires expected_issuer and expected_subject"):
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry.example.test",
+            use_cli_session=True,
+            cli_session_path="~/.lightnow/sessions/example.json",
+        )
+
+
 def test_config_accepts_registry_runtime_upstreams_without_static_reference() -> None:
     config = ProxyConfig(
         server=ServerConfig(),
@@ -594,7 +621,9 @@ async def test_router_maps_antigravity_conversation_to_generic_client_context() 
             self.events.append(payload)
 
     class FakeUpstreamClient:
-        async def call_tool(self, config: UpstreamConfig, tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+        async def call_tool(
+            self, config: UpstreamConfig, tool_name: str, arguments: dict[str, object]
+        ) -> CallToolResult:
             return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
     config = ProxyConfig(
