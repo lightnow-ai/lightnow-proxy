@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import httpx
@@ -101,11 +102,18 @@ def test_runtime_sse_context_is_rejected_for_now() -> None:
         upstream_config_from_runtime_context({"probe_request": {"transport": "sse"}}, upstream)
 
 
-def unsigned_token(exp: int | None = None) -> str:
+def unsigned_token(
+    exp: int | None = None,
+    *,
+    issuer: str | None = None,
+    subject: str = "user-1",
+) -> str:
     header = {"alg": "none", "typ": "JWT"}
-    payload = {"sub": "user-1"}
+    payload = {"sub": subject}
     if exp is not None:
         payload["exp"] = exp
+    if issuer is not None:
+        payload["iss"] = issuer
 
     import base64
 
@@ -135,6 +143,106 @@ def test_cli_session_loads_tenant_context(tmp_path) -> None:
 
     assert session.tenant_id == "tenant-uuid"
     assert session.access_token_expired() is False
+
+
+@pytest.mark.asyncio
+async def test_registry_client_uses_bound_session_path_and_validates_identity(tmp_path) -> None:
+    issuer = "https://auth.example.test/realms/example"
+    legacy_path = tmp_path / "config.json"
+    legacy_path.write_text("{}")
+    session_path = tmp_path / "sessions" / "account.json"
+    session_path.parent.mkdir()
+    session_path.write_text(
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "subject": "user-1",
+                "account_label": "Developer",
+                "access_token": unsigned_token(int(time.time()) + 3600, issuer=issuer),
+                "refresh_token": "refresh",
+                "issuer": issuer,
+                "client_id": "lightnow-cli",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry.example.test",
+            use_cli_session=True,
+            cli_config_path=str(legacy_path),
+            cli_session_path=str(session_path),
+            expected_issuer=issuer,
+            expected_subject="user-1",
+        )
+    )
+
+    session = await client._cli_session()
+
+    assert session.session_id == "session-1"
+    assert session.account_label == "Developer"
+
+
+@pytest.mark.asyncio
+async def test_registry_client_rejects_cross_environment_session(tmp_path) -> None:
+    session_path = tmp_path / "session.json"
+    session_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(
+                    int(time.time()) + 3600,
+                    issuer="https://auth.lightnow.ai/realms/lightnow",
+                ),
+                "issuer": "https://auth.lightnow.ai/realms/lightnow",
+                "client_id": "lightnow-cli",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local/v0.1",
+            use_cli_session=True,
+            cli_session_path=str(session_path),
+            expected_issuer="https://auth.lightnow.local/realms/lightnow-local",
+            expected_subject="user-1",
+        )
+    )
+
+    with pytest.raises(RegistryApiError, match="issuer does not match"):
+        await client._cli_session()
+
+
+@pytest.mark.asyncio
+async def test_registry_client_rejects_different_bound_subject(tmp_path) -> None:
+    issuer = "https://auth.example.test/realms/example"
+    session_path = tmp_path / "session.json"
+    session_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(
+                    int(time.time()) + 3600,
+                    issuer=issuer,
+                    subject="other-user",
+                ),
+                "issuer": issuer,
+                "client_id": "lightnow-cli",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry.example.test",
+            use_cli_session=True,
+            cli_session_path=str(session_path),
+            expected_issuer=issuer,
+            expected_subject="user-1",
+        )
+    )
+
+    with pytest.raises(RegistryApiError, match="account does not match"):
+        await client._cli_session()
 
 
 @pytest.mark.asyncio
@@ -684,7 +792,28 @@ async def test_registry_client_omits_include_when_secrets_are_disabled(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_registry_client_refreshes_expired_cli_session(tmp_path) -> None:
+async def test_registry_client_refreshes_expired_cli_session(tmp_path, monkeypatch) -> None:
+    lock_threads: dict[str, int] = {}
+
+    class RecordingFileLock:
+        def __init__(self, _path, timeout):
+            self.timeout = timeout
+
+        def acquire(self):
+            lock_threads["acquire"] = threading.get_ident()
+            return self
+
+        def release(self):
+            lock_threads["release"] = threading.get_ident()
+
+        def __enter__(self):
+            return self.acquire()
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            self.release()
+
+    monkeypatch.setattr("lightnow_proxy.registry.FileLock", RecordingFileLock)
+    event_loop_thread = threading.get_ident()
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -722,3 +851,5 @@ async def test_registry_client_refreshes_expired_cli_session(tmp_path) -> None:
     saved = json.loads(config_path.read_text())
     assert saved["access_token"] == refreshed
     assert saved["refresh_token"] == "refresh-new"
+    assert lock_threads["acquire"] != event_loop_thread
+    assert lock_threads["release"] != event_loop_thread

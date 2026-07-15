@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 import ipaddress
+import os
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 import yaml
@@ -21,7 +21,12 @@ class ServerConfig(BaseModel):
 
 class LocalProxyConfig(BaseModel):
     enabled: bool = False
+    connection_id: UUID | None = None
+    connection_alias: str = "lightnow"
     profile: str = "default"
+    scope_type: Literal["personal", "tenant"] = "personal"
+    scope_id: str | None = None
+    account_label: str | None = None
     path: str = "/mcp"
     sync_from_lightnow: bool = False
     client_name: str = "local-proxy"
@@ -119,7 +124,17 @@ class RegistryApiConfig(BaseModel):
     tenant_scope_claim: str = "lightnow_tenant_id"
     use_cli_session: bool = False
     cli_config_path: str = "~/.lightnow/config.json"
+    cli_session_path: str | None = None
+    expected_issuer: str | None = None
+    expected_subject: str | None = None
     cli_tenant_id: str | None = None
+
+    @model_validator(mode="after")
+    def named_cli_session_must_have_identity_guardrails(self) -> "RegistryApiConfig":
+        if self.use_cli_session and self.cli_session_path:
+            if not self.expected_issuer or not self.expected_subject:
+                raise ValueError("cli_session_path requires expected_issuer and expected_subject")
+        return self
 
     def resolved_client_secret(self) -> str | None:
         if self.client_secret is None:
@@ -184,6 +199,18 @@ class ProxyConfig(BaseModel):
     runtime_secrets: RuntimeSecretsConfig = Field(default_factory=RuntimeSecretsConfig)
     profiles: dict[str, ProfileConfig]
     upstreams: dict[str, UpstreamConfig]
+
+    @model_validator(mode="after")
+    def bind_legacy_cli_sessions_to_configured_issuer(self) -> "ProxyConfig":
+        """Keep legacy configs readable while preventing cross-environment tokens."""
+        if (
+            self.registry_api
+            and self.registry_api.enabled
+            and self.registry_api.use_cli_session
+            and self.registry_api.expected_issuer is None
+        ):
+            self.registry_api.expected_issuer = self.auth.issuer
+        return self
 
     @field_validator("profiles")
     @classmethod

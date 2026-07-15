@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
   "mcp[cli]>=1.24.0",
   "httpx>=0.28.1",
+  "filelock>=3.16.1",
   "pydantic>=2.8.2",
   "pydantic-settings>=2.6.1",
   "pyjwt[crypto]>=2.10.1",

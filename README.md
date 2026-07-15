@@ -68,6 +68,28 @@ lightnow sync --client antigravity --local-proxy
 
 Restart the MCP client after syncing.
 
+### Multiple accounts and organizations
+
+Use a distinct `--connection` alias for every account, organization or profile
+that should appear in the same MCP client:
+
+```sh
+lightnow login
+lightnow sync --client codex --local-proxy \
+  --connection lightnow-personal --profile default
+
+# Sign in with the organization account before creating this connection.
+lightnow login
+lightnow sync --client codex --local-proxy \
+  --connection lightnow-acme --tenant <tenant-id> --profile engineering
+```
+
+Each generated proxy config has a stable connection ID and points to one named
+CLI session under `~/.lightnow/sessions/`. It also records the expected issuer
+and subject. The proxy refuses Registry requests when those values do not
+match, so a later CLI login cannot silently switch an existing connection. No
+access or refresh token is written to the proxy YAML.
+
 Check the local setup:
 
 ```sh
@@ -90,6 +112,12 @@ config, pass the generated path explicitly:
 lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
 lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
 ```
+
+Named connections use separate files such as
+`~/.lightnow/lightnow-proxy/codex-lightnow-acme.yaml`. The JSON health report
+shows their non-secret connection alias, ID, account label, scope, profile and
+identity-binding status. Legacy configs that use `cli_config_path` remain
+readable, but are restricted to the configured authentication issuer.
 
 When telemetry is enabled, active health checks are sent to the LightNow
 Control Plane as metadata-only proxy health events. The proxy also sends device

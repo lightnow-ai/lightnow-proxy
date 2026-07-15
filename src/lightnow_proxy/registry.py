@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -11,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 import jwt
+from filelock import FileLock
 from pydantic import ValidationError
 
 from lightnow_proxy.auth import Principal
@@ -29,6 +31,9 @@ class CliSession:
     issuer: str
     client_id: str
     tenant_id: str | None
+    session_id: str | None
+    subject: str | None
+    account_label: str | None
     raw: dict[str, Any]
 
     @classmethod
@@ -48,6 +53,9 @@ class CliSession:
         refresh_token = raw.get("refresh_token")
         context_type = raw.get("context_type")
         context_tenant = raw.get("context_tenant")
+        session_id = raw.get("session_id")
+        subject = raw.get("subject")
+        account_label = raw.get("account_label")
         if not isinstance(access_token, str) or access_token == "":
             raise RegistryApiError("LightNow CLI session has no access token. Run `lightnow login` first.")
         if not isinstance(issuer, str) or issuer == "":
@@ -61,8 +69,21 @@ class CliSession:
             issuer=issuer,
             client_id=client_id,
             tenant_id=tenant_id,
+            session_id=session_id if isinstance(session_id, str) and session_id else None,
+            subject=subject if isinstance(subject, str) and subject else None,
+            account_label=account_label if isinstance(account_label, str) and account_label else None,
             raw=raw,
         )
+
+    def token_claims(self) -> dict[str, Any]:
+        """Decode binding claims used only for local consistency checks."""
+        try:
+            claims = jwt.decode(self.access_token, options={"verify_signature": False, "verify_exp": False})
+        except jwt.PyJWTError as exc:
+            raise RegistryApiError("LightNow CLI access token is invalid. Run `lightnow login` again.") from exc
+        if not isinstance(claims, dict):
+            raise RegistryApiError("LightNow CLI access token has invalid claims")
+        return claims
 
     def access_token_expired(self) -> bool:
         try:
@@ -85,6 +106,9 @@ class CliSession:
             issuer=self.issuer,
             client_id=self.client_id,
             tenant_id=self.tenant_id,
+            session_id=self.session_id,
+            subject=self.subject,
+            account_label=self.account_label,
             raw=raw,
         )
 
@@ -450,13 +474,51 @@ class RegistryApiClient:
         return {"Authorization": f"Bearer {token}"}
 
     async def _cli_session(self) -> "CliSession":
-        path = Path(os.path.expanduser(self.config.cli_config_path))
+        configured_path = self.config.cli_session_path or self.config.cli_config_path
+        path = Path(os.path.expanduser(configured_path))
         session = CliSession.load(path)
+        self._validate_cli_session_binding(session)
         if session.access_token_expired():
-            session = await refresh_cli_session(session, self.config.timeout_seconds, verify=self._verify())
-            session.save(path)
+            lock = FileLock(f"{path}.lock", timeout=self.config.timeout_seconds)
+            await asyncio.to_thread(lock.acquire)
+            try:
+                session = CliSession.load(path)
+                self._validate_cli_session_binding(session)
+                if session.access_token_expired():
+                    session = await refresh_cli_session(session, self.config.timeout_seconds, verify=self._verify())
+                    self._validate_cli_session_binding(session)
+                    session.save(path)
+            finally:
+                await asyncio.to_thread(lock.release)
         self._tenant_id = session.tenant_id
         return session
+
+    def _validate_cli_session_binding(self, session: CliSession) -> None:
+        claims = session.token_claims()
+        token_issuer = claims.get("iss")
+        token_subject = claims.get("sub")
+        expected_issuer = self.config.expected_issuer
+        expected_subject = self.config.expected_subject
+
+        if expected_issuer and session.issuer.rstrip("/") != expected_issuer.rstrip("/"):
+            raise RegistryApiError(
+                "LightNow session issuer does not match this proxy connection "
+                f"(expected {expected_issuer}, got {session.issuer}). Re-sync this connection."
+            )
+        if expected_issuer and (
+            not isinstance(token_issuer, str) or token_issuer.rstrip("/") != expected_issuer.rstrip("/")
+        ):
+            raise RegistryApiError(
+                "LightNow access token issuer does not match this proxy connection. "
+                "Log in to the expected environment and re-sync this connection."
+            )
+        if expected_subject and token_subject != expected_subject:
+            raise RegistryApiError(
+                "LightNow access token account does not match this proxy connection. "
+                "Activate the intended account and re-sync this connection."
+            )
+        if session.subject and token_subject != session.subject:
+            raise RegistryApiError("LightNow session metadata does not match its access token subject")
 
     async def _client_credentials_token(self) -> str | None:
         if self._access_token is not None:
