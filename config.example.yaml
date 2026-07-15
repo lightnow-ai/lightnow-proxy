@@ -48,7 +48,8 @@ registry_api:
 # Credentials are not stored in this file. HashiCorp Vault Proxy auto-auth is
 # used by default; install lightnow-proxy[keyring] for auth_mode=keyring.
 runtime_secrets:
-  providers:
+  providers: {}
+    # Replace the empty mapping above with a provider entry when needed:
     # "provider-uuid":
     #   auth_mode: "vault-proxy"
     #   vault_proxy_url: "http://127.0.0.1:8200"
