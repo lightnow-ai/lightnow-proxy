@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -462,13 +463,16 @@ class RegistryApiClient:
         self._validate_cli_session_binding(session)
         if session.access_token_expired():
             lock = FileLock(f"{path}.lock", timeout=self.config.timeout_seconds)
-            with lock:
+            await asyncio.to_thread(lock.acquire)
+            try:
                 session = CliSession.load(path)
                 self._validate_cli_session_binding(session)
                 if session.access_token_expired():
                     session = await refresh_cli_session(session, self.config.timeout_seconds, verify=self._verify())
                     self._validate_cli_session_binding(session)
                     session.save(path)
+            finally:
+                await asyncio.to_thread(lock.release)
         self._tenant_id = session.tenant_id
         return session
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import httpx
@@ -748,7 +749,28 @@ async def test_registry_client_omits_include_when_secrets_are_disabled(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_registry_client_refreshes_expired_cli_session(tmp_path) -> None:
+async def test_registry_client_refreshes_expired_cli_session(tmp_path, monkeypatch) -> None:
+    lock_threads: dict[str, int] = {}
+
+    class RecordingFileLock:
+        def __init__(self, _path, timeout):
+            self.timeout = timeout
+
+        def acquire(self):
+            lock_threads["acquire"] = threading.get_ident()
+            return self
+
+        def release(self):
+            lock_threads["release"] = threading.get_ident()
+
+        def __enter__(self):
+            return self.acquire()
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            self.release()
+
+    monkeypatch.setattr("lightnow_proxy.registry.FileLock", RecordingFileLock)
+    event_loop_thread = threading.get_ident()
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -786,3 +808,5 @@ async def test_registry_client_refreshes_expired_cli_session(tmp_path) -> None:
     saved = json.loads(config_path.read_text())
     assert saved["access_token"] == refreshed
     assert saved["refresh_token"] == "refresh-new"
+    assert lock_threads["acquire"] != event_loop_thread
+    assert lock_threads["release"] != event_loop_thread
