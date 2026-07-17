@@ -293,6 +293,7 @@ async def test_registry_client_fetches_profile_servers_with_cli_session(tmp_path
             server="codex-test1.lightnow/release-smoke",
             version="1.0.1",
             runtime_profile="default",
+            instance_alias="release-smoke",
         )
     ]
 
@@ -420,6 +421,80 @@ async def test_registry_client_fetches_mixed_profile_upstreams(tmp_path) -> None
     assert upstreams[0].config.env == {"REDIS_HOST": "localhost"}
     assert upstreams[1].server_name == "codex-test1.lightnow/release-smoke"
     assert upstreams[1].config.command == "uvx"
+
+
+@pytest.mark.asyncio
+async def test_registry_client_uses_linked_profile_config_without_reselecting_transport(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) + 3600),
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local/v0.1",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        )
+    )
+
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get(
+            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
+        ).respond(
+            200,
+            json={
+                "servers": [
+                    {
+                        "alias": "github-mcp-server",
+                        "server_name": "io.github.github/github-mcp-server",
+                        "version": "1.4.0",
+                        "status": "linked",
+                        "transport": "stdio",
+                        "client_config": {
+                            "transport": "stdio",
+                            "command": "docker",
+                            "args": [
+                                "run",
+                                "--rm",
+                                "-i",
+                                "-e",
+                                "GITHUB_PERSONAL_ACCESS_TOKEN",
+                                "ghcr.io/github/github-mcp-server",
+                            ],
+                            "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "profile-secret"},
+                        },
+                        # A stale/inconsistent context must never override the
+                        # canonical profile client configuration.
+                        "context": {
+                            "probe_request": {
+                                "transport": "http",
+                                "http": {"url": "https://api.githubcopilot.com/mcp/", "headers": {}},
+                            }
+                        },
+                    }
+                ]
+            },
+        )
+
+        upstreams = await client.fetch_profile_upstreams("default", None)
+
+    assert dict(route.calls.last.request.url.params) == {"include": "secrets"}
+    assert len(route.calls) == 1
+    assert len(upstreams) == 1
+    assert upstreams[0].name == "github-mcp-server"
+    assert upstreams[0].server_name == "io.github.github/github-mcp-server"
+    assert upstreams[0].config.transport == "stdio"
+    assert upstreams[0].config.command == "docker"
+    assert upstreams[0].config.args[-1] == "ghcr.io/github/github-mcp-server"
+    assert upstreams[0].config.env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "profile-secret"}
 
 
 @pytest.mark.asyncio
@@ -665,6 +740,7 @@ async def test_registry_client_resolves_runtime_context_with_local_runner_consum
         server="codex-test1.lightnow/release-smoke",
         version="1.0.1",
         runtime_profile="default",
+        instance_alias="release-smoke-local",
     )
 
     with respx.mock(assert_all_called=True) as router:
@@ -683,6 +759,7 @@ async def test_registry_client_resolves_runtime_context_with_local_runner_consum
         resolved = await client.resolve_upstream(upstream, None)
 
     assert route.calls.last.request.url.params["profile"] == "default"
+    assert route.calls.last.request.url.params["alias"] == "release-smoke-local"
     assert route.calls.last.request.url.params["include"] == "secrets"
     assert route.calls.last.request.url.params["consumer"] == "local-runner"
     assert "scopeType" not in route.calls.last.request.url.params

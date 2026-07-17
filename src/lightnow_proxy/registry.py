@@ -224,6 +224,7 @@ class RegistryApiClient:
                     server=server_name,
                     version=version,
                     runtime_profile=profile_name,
+                    instance_alias=alias,
                 )
             )
         return upstreams
@@ -244,55 +245,11 @@ class RegistryApiClient:
         if not isinstance(servers, list):
             raise RegistryApiError("Registry profile servers response must include a servers array")
 
-        upstreams: list[ResolvedRuntimeUpstream] = []
-        for item in servers:
-            if not isinstance(item, dict):
-                continue
-            alias = item.get("alias")
-            server_name = item.get("server_name")
-            status = item.get("status")
-            if not isinstance(alias, str) or alias == "":
-                raise RegistryApiError("Registry profile server is missing alias")
-            if not isinstance(server_name, str) or server_name == "":
-                raise RegistryApiError(f"Registry profile server {alias!r} is missing server_name")
-
-            if status == "linked":
-                version = item.get("version")
-                if not isinstance(version, str) or version == "":
-                    raise RegistryApiError(f"Registry profile server {alias!r} is missing version")
-                resolved = await self.resolve_upstream(
-                    RuntimeUpstreamConfig(
-                        name=alias,
-                        server=server_name,
-                        version=version,
-                        runtime_profile=profile_name,
-                    ),
-                    principal,
-                )
-                upstreams.append(
-                    ResolvedRuntimeUpstream(
-                        name=resolved.name,
-                        config=resolved.config,
-                        server_name=server_name,
-                    )
-                )
-                continue
-
-            if status == "custom":
-                client_config = item.get("client_config")
-                if not isinstance(client_config, dict):
-                    raise RegistryApiError(f"Custom profile server {alias!r} is missing client_config")
-                upstreams.append(
-                    ResolvedRuntimeUpstream(
-                        name=alias,
-                        config=upstream_config_from_client_config(client_config),
-                        server_name=server_name,
-                    )
-                )
-                continue
-
-            raise RegistryApiError(f"Registry profile server {alias!r} is not runnable")
-        return upstreams
+        return [
+            await self._profile_server_to_upstream(item, profile_name, principal)
+            for item in servers
+            if isinstance(item, dict)
+        ]
 
     async def fetch_profile_upstream_names(self, profile_name: str) -> list[str]:
         payload = await self._fetch_profile_servers(profile_name, include_secrets=False)
@@ -380,12 +337,25 @@ class RegistryApiClient:
             version = item.get("version")
             if not isinstance(version, str) or version == "":
                 raise RegistryApiError(f"Registry profile server {alias!r} is missing version")
+
+            client_config = item.get("client_config")
+            if isinstance(client_config, dict):
+                resolved_client_config = await self._resolve_profile_client_config(item, client_config)
+                return ResolvedRuntimeUpstream(
+                    name=alias,
+                    config=upstream_config_from_client_config(resolved_client_config),
+                    server_name=server_name,
+                )
+
+            # Backward-compatible fallback for older Registry API responses
+            # that do not yet expose a runnable profile client_config.
             resolved = await self.resolve_upstream(
                 RuntimeUpstreamConfig(
                     name=alias,
                     server=server_name,
                     version=version,
                     runtime_profile=profile_name,
+                    instance_alias=alias,
                 ),
                 principal,
             )
@@ -406,6 +376,42 @@ class RegistryApiClient:
             )
 
         raise RegistryApiError(f"Registry profile server {alias!r} is not runnable")
+
+    async def _resolve_profile_client_config(
+        self,
+        item: dict[str, Any],
+        client_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Overlay runtime-only secrets onto the canonical profile config."""
+        context = item.get("context")
+        if self.runtime_secret_resolver is None or not isinstance(context, dict):
+            return client_config
+        if not context.get("external_secret_bindings"):
+            return client_config
+
+        resolved_context = await self.runtime_secret_resolver.resolve_context(context)
+        probe_request = resolved_context.get("probe_request")
+        if not isinstance(probe_request, dict):
+            raise RegistryApiError("Registry profile runtime context has no probe_request")
+
+        resolved = dict(client_config)
+        transport = probe_request.get("transport")
+        if transport == "stdio" and isinstance(probe_request.get("stdio"), dict):
+            stdio = probe_request["stdio"]
+            resolved["env"] = {
+                **_string_map(resolved.get("env")),
+                **_string_map(stdio.get("env")),
+            }
+        elif transport in {"http", "sse"} and isinstance(probe_request.get(transport), dict):
+            remote = probe_request[transport]
+            resolved["headers"] = {
+                **_string_map(resolved.get("headers")),
+                **_string_map(remote.get("headers")),
+            }
+        else:
+            raise RegistryApiError("Registry profile runtime context does not match client_config transport")
+
+        return resolved
 
     async def resolve_upstream(
         self,
@@ -435,6 +441,8 @@ class RegistryApiClient:
         params = {
             "profile": upstream.runtime_profile,
         }
+        if upstream.instance_alias:
+            params["alias"] = upstream.instance_alias
         if self.config.include_secrets:
             params["include"] = "secrets"
         if upstream.scope_type is not None:
