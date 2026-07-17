@@ -386,7 +386,56 @@ async def test_health_reports_degraded_when_an_upstream_fails() -> None:
     upstreams = {upstream["name"]: upstream for upstream in payload["profiles"][0]["upstreams"]}
     assert upstreams["grafana"]["status"] == "error"
     assert upstreams["grafana"]["error_type"] == "TimeoutError"
+    assert upstreams["grafana"]["diagnostic_code"] == "UPSTREAM_TIMEOUT"
+    assert upstreams["grafana"]["diagnostic_kind"] == "timeout"
+    assert upstreams["grafana"]["diagnostic_summary"] == "The MCP server did not respond before the timeout."
+    assert "Check that the server is reachable" in upstreams["grafana"]["remediation"]
     assert upstreams["nextcloud"]["status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_missing_docker_secret_becomes_actionable_health_telemetry(monkeypatch) -> None:
+    from lightnow_proxy.router import ToolRouter
+
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
+    config = ProxyConfig(
+        server=ServerConfig(),
+        local_proxy={"enabled": True, "profile": "default", "client_name": "codex"},
+        auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+        registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
+        profiles={"default": ProfileConfig(upstreams=["github"])},
+        upstreams={
+            "github": UpstreamConfig(
+                transport="stdio",
+                command="docker",
+                args=[
+                    "run",
+                    "--rm",
+                    "-i",
+                    "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server",
+                ],
+            ),
+        },
+    )
+    router = ToolRouter(config)
+    registry = FakeRuntimeEventRegistry()
+    router.registry_client = registry
+
+    report = await build_health_report(config, router)
+    await router.emit_health_event(report)
+
+    failure = report["profiles"][0]["upstreams"][0]
+    assert failure["error_type"] == "UpstreamConfigurationError"
+    assert failure["diagnostic_code"] == "DOCKER_ENV_MISSING"
+    assert failure["diagnostic_kind"] == "configuration"
+    assert failure["diagnostic_summary"] == "A Docker environment variable required by this MCP server is not available."
+    assert failure["remediation"] == (
+        "Configure GITHUB_PERSONAL_ACCESS_TOKEN as a managed or external secret in the Runtime Profile."
+    )
+    assert registry.events[0]["proxy_health_failures"][0]["diagnostic_code"] == "DOCKER_ENV_MISSING"
+    assert "managed or external secret" in registry.events[0]["proxy_health_failures"][0]["remediation"]
 
 
 @pytest.mark.asyncio
@@ -417,6 +466,13 @@ async def test_proxy_health_event_reports_redacted_upstream_failures() -> None:
             "duration_ms": event["proxy_health_failures"][0]["duration_ms"],
             "error_type": "TimeoutError",
             "error_message": "upstream did not answer",
+            "diagnostic_code": "UPSTREAM_TIMEOUT",
+            "diagnostic_kind": "timeout",
+            "diagnostic_summary": "The MCP server did not respond before the timeout.",
+            "remediation": (
+                "Check that the server is reachable and increase the configured timeout only if startup is "
+                "expected to be slow."
+            ),
         }
     ]
 

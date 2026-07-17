@@ -13,6 +13,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemplate, Tool
 
 from lightnow_proxy.config import UpstreamConfig
+from lightnow_proxy.diagnostics import validate_upstream_config
 
 
 class UpstreamMCPClient:
@@ -53,6 +54,8 @@ class UpstreamMCPClient:
     async def _stdio_session(self, config: UpstreamConfig) -> AsyncIterator[ClientSession]:
         if not config.command:
             raise ValueError("stdio upstream requires command")
+
+        validate_upstream_config(config)
 
         parameters = StdioServerParameters(
             command=config.command,

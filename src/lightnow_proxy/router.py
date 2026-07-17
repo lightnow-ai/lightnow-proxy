@@ -16,6 +16,7 @@ from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemp
 
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
+from lightnow_proxy.diagnostics import diagnostic_for_exception
 from lightnow_proxy.registry import RegistryApiClient
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_principal
@@ -81,6 +82,10 @@ class UpstreamHealth:
     duration_ms: int | None = None
     error_type: str | None = None
     error_message: str | None = None
+    diagnostic_code: str | None = None
+    diagnostic_kind: str | None = None
+    diagnostic_summary: str | None = None
+    remediation: str | None = None
 
 
 class ToolRouter:
@@ -199,14 +204,20 @@ class ToolRouter:
         _, tools, exc = await self._list_upstream_tools(upstream_name, upstream.config)
         duration_ms = self._duration_ms(started)
         if exc is not None:
+            leaf = unwrap_error(exc)
+            diagnostic = diagnostic_for_exception(leaf)
             return UpstreamHealth(
                 name=upstream_name,
                 transport=upstream.config.transport,
                 server_name=upstream.server_name,
                 status="error",
                 duration_ms=duration_ms,
-                error_type=error_type_name(exc),
-                error_message=error_message(exc),
+                error_type=error_type_name(leaf),
+                error_message=error_message(leaf),
+                diagnostic_code=diagnostic.code,
+                diagnostic_kind=diagnostic.kind,
+                diagnostic_summary=diagnostic.summary,
+                remediation=diagnostic.remediation,
             )
         return UpstreamHealth(
             name=upstream_name,
@@ -867,6 +878,18 @@ def proxy_health_failures(report: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "error_type": upstream.get("error_type") if isinstance(upstream.get("error_type"), str) else None,
                 "error_message": upstream.get("error_message")
                 if isinstance(upstream.get("error_message"), str)
+                else None,
+                "diagnostic_code": upstream.get("diagnostic_code")
+                if isinstance(upstream.get("diagnostic_code"), str)
+                else None,
+                "diagnostic_kind": upstream.get("diagnostic_kind")
+                if isinstance(upstream.get("diagnostic_kind"), str)
+                else None,
+                "diagnostic_summary": upstream.get("diagnostic_summary")
+                if isinstance(upstream.get("diagnostic_summary"), str)
+                else None,
+                "remediation": upstream.get("remediation")
+                if isinstance(upstream.get("remediation"), str)
                 else None,
             }
             failures.append({key: value for key, value in failure.items() if value is not None})
