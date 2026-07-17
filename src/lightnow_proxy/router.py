@@ -21,6 +21,7 @@ from lightnow_proxy.registry import RegistryApiClient
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_principal
 from lightnow_proxy.upstream import UpstreamMCPClient
+from lightnow_proxy.version_inventory import heartbeat_version_fields
 
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
@@ -627,10 +628,12 @@ class ToolRouter:
             return False
         local_proxy = self.config.local_proxy
         self.device_heartbeat_last_attempt_at = datetime.now(UTC)
+        device_versions, runner_versions = heartbeat_version_fields(local_proxy)
         payload = {
             "device": {
                 "reported_hostname": local_proxy.device_hostname,
                 "platform": local_proxy.device_platform,
+                **device_versions,
             },
             "client": {
                 "name": self.client_context.name or local_proxy.client_name,
@@ -638,6 +641,7 @@ class ToolRouter:
                 "profile": local_proxy.profile,
                 "runner_name": local_proxy.runner_name,
                 "runner_version": __version__,
+                **runner_versions,
                 "transport": local_proxy.client_transport,
             },
         }
@@ -888,9 +892,7 @@ def proxy_health_failures(report: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "diagnostic_summary": upstream.get("diagnostic_summary")
                 if isinstance(upstream.get("diagnostic_summary"), str)
                 else None,
-                "remediation": upstream.get("remediation")
-                if isinstance(upstream.get("remediation"), str)
-                else None,
+                "remediation": upstream.get("remediation") if isinstance(upstream.get("remediation"), str) else None,
             }
             failures.append({key: value for key, value in failure.items() if value is not None})
 
