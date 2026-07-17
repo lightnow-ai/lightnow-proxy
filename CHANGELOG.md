@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.4.2...v1.5.0) (2026-07-17)
+
+
+### Features
+
+* **#15:** report update status ([89f3289](https://github.com/lightnow-ai/lightnow-proxy/commit/89f32898aece5f5040d1895b54f68c5cd42b292c))
+* report update status ([6577e29](https://github.com/lightnow-ai/lightnow-proxy/commit/6577e2909c252bbd4eb1000649ce1043a85f379e))
+
+
+### Bug Fixes
+
+* resolve proxy installer from path ([c8dfb2a](https://github.com/lightnow-ai/lightnow-proxy/commit/c8dfb2a5e5d7fbc5019a417f3c37cfd354855f4a))
+
 ## [1.4.2](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.4.1...v1.4.2) (2026-07-17)
 
 
