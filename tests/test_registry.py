@@ -652,6 +652,95 @@ async def test_registry_client_overlays_runtime_secrets_on_profile_client_config
 
 
 @pytest.mark.asyncio
+async def test_registry_client_rejects_runtime_secret_context_with_conflicting_transport() -> None:
+    client = RegistryApiClient(
+        RegistryApiConfig(enabled=True, base_url="https://registry-api.lightnow.local/v0.1"),
+        RuntimeSecretResolver(RuntimeSecretsConfig()),
+    )
+    item = {
+        "context": {
+            "probe_request": {
+                "transport": "http",
+                "http": {"url": "https://stale.example.test/mcp", "headers": {}},
+            },
+            "external_secret_bindings": [
+                {
+                    "provider": {
+                        "id": "provider-uuid",
+                        "provider_type": "vault_kv_v2",
+                        "resolution_mode": "runtime",
+                        "config": {"address": "https://vault.internal"},
+                    },
+                    "locator": {"path": "secret/data/lightnow/github", "field": "token"},
+                    "target": {"type": "header", "name": "Authorization"},
+                }
+            ],
+        }
+    }
+
+    with pytest.raises(RegistryApiError, match="stdio.*does not match.*http"):
+        await client._resolve_profile_client_config(
+            item,
+            {
+                "transport": "stdio",
+                "command": "docker",
+                "args": ["run", "--rm", "-i", "ghcr.io/github/github-mcp-server"],
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_registry_client_accepts_http_context_for_streamable_http_client_config() -> None:
+    client = RegistryApiClient(
+        RegistryApiConfig(enabled=True, base_url="https://registry-api.lightnow.local/v0.1"),
+        RuntimeSecretResolver(RuntimeSecretsConfig()),
+    )
+    item = {
+        "context": {
+            "probe_request": {
+                "transport": "http",
+                "http": {"url": "https://stale.example.test/mcp", "headers": {}},
+            },
+            "external_secret_bindings": [
+                {
+                    "provider": {
+                        "id": "provider-uuid",
+                        "provider_type": "vault_kv_v2",
+                        "resolution_mode": "runtime",
+                        "config": {"address": "https://vault.internal"},
+                    },
+                    "locator": {"path": "secret/data/lightnow/remote", "field": "token"},
+                    "target": {"type": "header", "name": "Authorization"},
+                }
+            ],
+        }
+    }
+    client_config = {
+        "transport": "streamable-http",
+        "url": "https://canonical.example.test/mcp",
+        "headers": {"X-Profile": "default"},
+    }
+
+    with respx.mock(assert_all_called=True) as router:
+        vault_route = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/remote").respond(
+            200,
+            json={"data": {"data": {"token": "Bearer runtime-secret"}}},
+        )
+
+        resolved = await client._resolve_profile_client_config(item, client_config)
+
+    assert len(vault_route.calls) == 1
+    assert resolved == {
+        "transport": "streamable-http",
+        "url": "https://canonical.example.test/mcp",
+        "headers": {
+            "X-Profile": "default",
+            "Authorization": "Bearer runtime-secret",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_registry_client_fetches_profile_names_without_secrets(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

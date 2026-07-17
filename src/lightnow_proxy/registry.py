@@ -389,10 +389,21 @@ class RegistryApiClient:
         if not context.get("external_secret_bindings"):
             return client_config
 
-        resolved_context = await self.runtime_secret_resolver.resolve_context(context)
-        probe_request = resolved_context.get("probe_request")
+        probe_request = context.get("probe_request")
         if not isinstance(probe_request, dict):
             raise RegistryApiError("Registry profile runtime context has no probe_request")
+
+        client_transport = _canonical_runtime_transport(client_config.get("transport") or "stdio")
+        context_transport = _canonical_runtime_transport(probe_request.get("transport"))
+        if client_transport is None or context_transport is None or client_transport != context_transport:
+            raise RegistryApiError(
+                "Registry profile client_config transport "
+                f"{client_config.get('transport') or 'stdio'!r} does not match runtime context transport "
+                f"{probe_request.get('transport')!r}"
+            )
+
+        resolved_context = await self.runtime_secret_resolver.resolve_context(context)
+        probe_request = resolved_context["probe_request"]
 
         resolved = dict(client_config)
         transport = probe_request.get("transport")
@@ -652,6 +663,14 @@ def _registry_transport(transport: str) -> str:
     if transport == "streamable-http":
         return "streamable-http"
     return transport
+
+
+def _canonical_runtime_transport(value: Any) -> str | None:
+    if value in {"http", "streamable-http"}:
+        return "http"
+    if value in {"stdio", "sse"}:
+        return str(value)
+    return None
 
 
 def _string_map(value: Any) -> dict[str, str]:
