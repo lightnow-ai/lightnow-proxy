@@ -24,6 +24,24 @@ class RegistryApiError(Exception):
     pass
 
 
+async def _acquire_file_lock(lock: FileLock) -> None:
+    acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire))
+    try:
+        await asyncio.shield(acquire_task)
+    except asyncio.CancelledError:
+        loop = asyncio.get_running_loop()
+
+        def release_if_acquired(completed: asyncio.Task[Any]) -> None:
+            try:
+                completed.result()
+            except BaseException:
+                return
+            loop.create_task(asyncio.to_thread(lock.release))
+
+        acquire_task.add_done_callback(release_if_acquired)
+        raise
+
+
 @dataclass(frozen=True)
 class CliSession:
     access_token: str
@@ -499,7 +517,7 @@ class RegistryApiClient:
         self._validate_cli_session_binding(session)
         if session.access_token_expired():
             lock = FileLock(f"{path}.lock", timeout=self.config.timeout_seconds)
-            await asyncio.to_thread(lock.acquire)
+            await _acquire_file_lock(lock)
             try:
                 session = CliSession.load(path)
                 self._validate_cli_session_binding(session)
