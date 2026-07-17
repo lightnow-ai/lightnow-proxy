@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.2](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.4.1...v1.4.2) (2026-07-17)
+
+
+### Bug Fixes
+
+* **#13:** clear runtime diagnostics ([3751a62](https://github.com/lightnow-ai/lightnow-proxy/commit/3751a62050dfee7fffcf943bfce4c9487c9c269a))
+* release cancelled session locks ([7c1dfff](https://github.com/lightnow-ai/lightnow-proxy/commit/7c1dfff2da78622a6baf664d3059409112e1e808))
+* report actionable runtime diagnostics ([4201c66](https://github.com/lightnow-ai/lightnow-proxy/commit/4201c665a971fe1753ad554de8e11f4a58a3b007))
+
 ## [1.4.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.4.0...v1.4.1) (2026-07-17)
 
 
