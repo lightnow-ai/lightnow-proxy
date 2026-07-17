@@ -64,6 +64,9 @@ Required GitHub setup:
 - Repository secret: `RELEASE_PLEASE_TOKEN`
 - Token permissions: contents, pull requests, and issues read/write for this
   repository
+- Repository secret: `HOMEBREW_TAP_TOKEN`
+- Token permissions: contents read/write for `lightnow-ai/homebrew-tap`; the
+  token is used only to send the post-PyPI repository dispatch
 - Repository Actions setting: allow GitHub Actions to create pull requests
 
 Use a real PAT or GitHub App token for `RELEASE_PLEASE_TOKEN`, not the default
@@ -78,7 +81,9 @@ Normal release flow:
 4. Release Please creates the `vX.Y.Z` tag and GitHub Release.
 5. The existing tag-based `Release` workflow builds and publishes PyPI
    distributions through Trusted Publishing.
-6. Update the Homebrew tap after the release artifact is available.
+6. After PyPI succeeds, the release workflow dispatches the exact published
+   version to `lightnow-ai/homebrew-tap`. The tap regenerates, audits, installs,
+   and tests the formula before committing it.
 7. Publish or update the official MCP Registry listing from `server.json`.
 
 Manual release checklist for fallback or first-time setup:
@@ -110,11 +115,10 @@ Manual release checklist for fallback or first-time setup:
    - `twine check` passes,
    - a GitHub Release is created with generated release notes and distribution artifacts,
    - PyPI publish succeeds through Trusted Publishing.
-7. Update the Homebrew tap after the release artifact is available:
-   - repository: `lightnow-ai/homebrew-tap`
-   - formula: `Formula/lightnow-proxy.rb`
-   - replace the formula template URL, version and SHA256 with the released artifact,
-   - run `brew audit`, `brew install --build-from-source`, and `brew test`.
+7. Verify the `Update formula` workflow in `lightnow-ai/homebrew-tap`. For a
+   recovery run, dispatch it manually with formula `lightnow-proxy` and the
+   exact already-published version; it uses the same generation and verification
+   path as the automatic release dispatch.
 8. Publish or update the official MCP Registry listing from `server.json`.
 9. Verify fresh installs on a clean machine or isolated tool environment:
    ```bash
