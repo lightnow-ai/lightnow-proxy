@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -1173,3 +1174,53 @@ async def test_registry_client_refreshes_expired_cli_session(tmp_path, monkeypat
     assert saved["refresh_token"] == "refresh-new"
     assert lock_threads["acquire"] != event_loop_thread
     assert lock_threads["release"] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cli_session_lock_acquisition_releases_late_lock(tmp_path, monkeypatch) -> None:
+    acquire_started = threading.Event()
+    allow_acquire = threading.Event()
+    released = threading.Event()
+
+    class DelayedFileLock:
+        def __init__(self, _path, timeout):
+            self.timeout = timeout
+
+        def acquire(self):
+            acquire_started.set()
+            allow_acquire.wait(timeout=2)
+            return self
+
+        def release(self):
+            released.set()
+
+    monkeypatch.setattr("lightnow_proxy.registry.FileLock", DelayedFileLock)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) - 60),
+                "refresh_token": "refresh-old",
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        )
+    )
+
+    session_task = asyncio.create_task(client._cli_session())
+    assert await asyncio.to_thread(acquire_started.wait, 1)
+    session_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await session_task
+
+    allow_acquire.set()
+    assert await asyncio.to_thread(released.wait, 1)
