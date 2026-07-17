@@ -67,6 +67,7 @@ class RuntimeUpstreamConfig(BaseModel):
     server: str
     version: str
     runtime_profile: str = "default"
+    alias: str | None = None
     transport: Literal["streamable-http", "stdio", "sse"] | None = None
     scope_type: Literal["system", "tenant", "user"] | None = None
     scope_id: str | None = None
