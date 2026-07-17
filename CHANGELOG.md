@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.4.0...v1.4.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **#11:** use resolved profile client configuration ([cb43612](https://github.com/lightnow-ai/lightnow-proxy/commit/cb436122a34e5a0bcf1234f58f5aa81640d014a9))
+* preserve profile aliases end to end ([ef642c2](https://github.com/lightnow-ai/lightnow-proxy/commit/ef642c26eebfcbe01fd34359a52738e6f9452100))
+* use resolved profile client configuration ([1728eb6](https://github.com/lightnow-ai/lightnow-proxy/commit/1728eb6fac8e4c6c3a8772884776dcb6ff111027))
+* validate profile secret transport ([39ca1f7](https://github.com/lightnow-ai/lightnow-proxy/commit/39ca1f78814bd3af45abcefe1a4dcf4c4f84247b))
+
 ## [1.4.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.3.0...v1.4.0) (2026-07-15)
 
 
