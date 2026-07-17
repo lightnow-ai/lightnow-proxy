@@ -53,6 +53,17 @@ For repository-local development:
 uv tool install --from . lightnow-proxy
 ```
 
+Update supported CLI and Proxy installations through the LightNow CLI:
+
+```sh
+lightnow update --check
+lightnow update
+```
+
+Homebrew, pipx and uv are managed. The proxy only reports its observed version
+and update state in metadata-only heartbeats; it never invokes a package manager
+or delays MCP startup to check for releases.
+
 ## Configure a Client
 
 Use the LightNow CLI. It writes the client MCP entry and the per-client Local
@@ -123,8 +134,9 @@ When telemetry is enabled, active health checks are sent to the LightNow
 Control Plane as metadata-only proxy health events. The proxy also sends device
 presence immediately at startup and every two minutes. The Control Plane can
 then show which devices, clients and profiles are active, healthy, degraded, or
-failing without storing secrets, tool arguments, response bodies, network
-addresses, hardware identifiers, or local paths.
+failing, along with CLI/Proxy versions and update status, without storing
+secrets, tool arguments, response bodies, network addresses, hardware
+identifiers, or local paths.
 
 Vault providers configured for runtime resolution are resolved on this host,
 after Registry API has returned a provider reference without credentials or a

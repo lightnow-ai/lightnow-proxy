@@ -44,6 +44,9 @@ class LocalProxyConfig(BaseModel):
     client_instance_id: UUID | None = None
     device_hostname: str | None = None
     device_platform: Literal["macos", "windows", "linux", "unknown"] = "unknown"
+    cli_version: str | None = None
+    cli_install_method: Literal["homebrew", "pipx", "uv", "unknown"] = "unknown"
+    update_state_path: str = "~/.lightnow/update-state.json"
 
     @field_validator("path")
     @classmethod

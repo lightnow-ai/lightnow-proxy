@@ -214,7 +214,7 @@ async def test_status_reports_non_secret_local_proxy_runtime_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_device_heartbeat_loop_sends_immediately_then_waits_two_minutes() -> None:
+async def test_device_heartbeat_loop_sends_immediately_then_waits_two_minutes(tmp_path) -> None:
     """Presence starts immediately and the regular interval is the only retry loop."""
 
     class StopHeartbeatLoop(Exception):
@@ -242,6 +242,9 @@ async def test_device_heartbeat_loop_sends_immediately_then_waits_two_minutes() 
     config.local_proxy.client_instance_id = "22222222-2222-4222-8222-222222222222"
     config.local_proxy.device_hostname = "mac-01"
     config.local_proxy.device_platform = "macos"
+    config.local_proxy.cli_version = "1.3.1"
+    config.local_proxy.cli_install_method = "homebrew"
+    config.local_proxy.update_state_path = str(tmp_path / "missing-update-state.json")
 
     from lightnow_proxy.router import ToolRouter
 
@@ -260,9 +263,16 @@ async def test_device_heartbeat_loop_sends_immediately_then_waits_two_minutes() 
     assert payload["device"] == {
         "reported_hostname": "mac-01",
         "platform": "macos",
+        "cli_version": "1.3.1",
+        "cli_install_method": "homebrew",
+        "cli_latest_version": None,
+        "cli_update_status": "unknown",
+        "cli_update_checked_at": None,
     }
     assert payload["client"]["profile"] == "research"
     assert payload["client"]["runner_version"] == __version__
+    assert payload["client"]["runner_install_method"] in {"homebrew", "pipx", "uv", "unknown"}
+    assert payload["client"]["runner_update_status"] == "unknown"
     assert router.device_heartbeat_status()["last_success_at"] is not None
 
 
@@ -430,7 +440,9 @@ async def test_missing_docker_secret_becomes_actionable_health_telemetry(monkeyp
     assert failure["error_type"] == "UpstreamConfigurationError"
     assert failure["diagnostic_code"] == "DOCKER_ENV_MISSING"
     assert failure["diagnostic_kind"] == "configuration"
-    assert failure["diagnostic_summary"] == "A Docker environment variable required by this MCP server is not available."
+    assert (
+        failure["diagnostic_summary"] == "A Docker environment variable required by this MCP server is not available."
+    )
     assert failure["remediation"] == (
         "Configure GITHUB_PERSONAL_ACCESS_TOKEN as a managed or external secret in the Runtime Profile."
     )

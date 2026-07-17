@@ -83,7 +83,8 @@ Normal release flow:
    distributions through Trusted Publishing.
 6. After PyPI succeeds, the release workflow dispatches the exact published
    version to `lightnow-ai/homebrew-tap`. The tap regenerates, audits, installs,
-   and tests the formula before committing it.
+   and tests the formula before committing it together with the machine-readable
+   release catalog. The catalog advances only after Homebrew verification.
 7. Publish or update the official MCP Registry listing from `server.json`.
 
 Manual release checklist for fallback or first-time setup:
@@ -119,19 +120,21 @@ Manual release checklist for fallback or first-time setup:
    recovery run, dispatch it manually with formula `lightnow-proxy` and the
    exact already-published version; it uses the same generation and verification
    path as the automatic release dispatch.
-8. Publish or update the official MCP Registry listing from `server.json`.
-9. Verify fresh installs on a clean machine or isolated tool environment:
+8. Verify `releases.json` and `lightnow update --check` report the published
+   Proxy version.
+9. Publish or update the official MCP Registry listing from `server.json`.
+10. Verify fresh installs on a clean machine or isolated tool environment:
    ```bash
    uv tool install lightnow-proxy
    lightnow-proxy --version
    pipx install lightnow-proxy
    lightnow-proxy --version
    ```
-10. Verify one local active upstream check:
+11. Verify one local active upstream check:
    ```bash
    lightnow-proxy --health --json
    ```
-11. Verify at least one real Local Proxy sync and MCP call with the current
+12. Verify at least one real Local Proxy sync and MCP call with the current
     LightNow CLI against the local or production Registry API.
 
 Do not publish with long-lived local PyPI tokens.
