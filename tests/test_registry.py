@@ -293,7 +293,7 @@ async def test_registry_client_fetches_profile_servers_with_cli_session(tmp_path
             server="codex-test1.lightnow/release-smoke",
             version="1.0.1",
             runtime_profile="default",
-            instance_alias="release-smoke",
+            alias="release-smoke",
         )
     ]
 
@@ -424,6 +424,74 @@ async def test_registry_client_fetches_mixed_profile_upstreams(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_registry_client_preserves_profile_aliases_during_legacy_context_fallback(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) + 3600),
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local/v0.1",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        )
+    )
+
+    context_url = (
+        "https://registry-api.lightnow.local/v0.1/servers/"
+        "codex-test1.lightnow%2Frelease-smoke/versions/1.0.1/context"
+    )
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200,
+            json={
+                "servers": [
+                    {
+                        "alias": "release-smoke-primary",
+                        "server_name": "codex-test1.lightnow/release-smoke",
+                        "version": "1.0.1",
+                        "status": "linked",
+                    },
+                    {
+                        "alias": "release-smoke-secondary",
+                        "server_name": "codex-test1.lightnow/release-smoke",
+                        "version": "1.0.1",
+                        "status": "linked",
+                    },
+                ]
+            },
+        )
+        context_route = router.get(context_url).respond(
+            200,
+            json={
+                "probe_request": {
+                    "transport": "stdio",
+                    "stdio": {"cmd": "uvx", "args": ["release-smoke"]},
+                }
+            },
+        )
+
+        upstreams = await client.fetch_profile_upstreams("default", None)
+
+    assert [upstream.name for upstream in upstreams] == [
+        "release-smoke-primary",
+        "release-smoke-secondary",
+    ]
+    assert [call.request.url.params["alias"] for call in context_route.calls] == [
+        "release-smoke-primary",
+        "release-smoke-secondary",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_registry_client_uses_linked_profile_config_without_reselecting_transport(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -495,6 +563,92 @@ async def test_registry_client_uses_linked_profile_config_without_reselecting_tr
     assert upstreams[0].config.command == "docker"
     assert upstreams[0].config.args[-1] == "ghcr.io/github/github-mcp-server"
     assert upstreams[0].config.env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "profile-secret"}
+
+
+@pytest.mark.asyncio
+async def test_registry_client_overlays_runtime_secrets_on_profile_client_config(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) + 3600),
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local/v0.1",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        ),
+        RuntimeSecretResolver(RuntimeSecretsConfig()),
+    )
+
+    with respx.mock(assert_all_called=True) as router:
+        profile_route = router.get(
+            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
+        ).respond(
+            200,
+            json={
+                "servers": [
+                    {
+                        "alias": "github-mcp-server",
+                        "server_name": "io.github.github/github-mcp-server",
+                        "version": "1.4.0",
+                        "status": "linked",
+                        "client_config": {
+                            "transport": "stdio",
+                            "command": "docker",
+                            "args": ["run", "--rm", "-i", "ghcr.io/github/github-mcp-server"],
+                            "env": {"LOG_LEVEL": "info"},
+                        },
+                        "context": {
+                            "probe_request": {
+                                "transport": "stdio",
+                                "stdio": {"cmd": "docker", "env": {}},
+                            },
+                            "external_secret_bindings": [
+                                {
+                                    "provider": {
+                                        "id": "provider-uuid",
+                                        "provider_type": "vault_kv_v2",
+                                        "resolution_mode": "runtime",
+                                        "config": {"address": "https://vault.internal"},
+                                    },
+                                    "locator": {
+                                        "path": "secret/data/lightnow/github",
+                                        "field": "token",
+                                    },
+                                    "target": {
+                                        "type": "env",
+                                        "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+        )
+        vault_route = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/github").respond(
+            200,
+            json={"data": {"data": {"token": "runtime-secret"}}},
+        )
+
+        upstreams = await client.fetch_profile_upstreams("default", None)
+
+    assert len(profile_route.calls) == 1
+    assert len(vault_route.calls) == 1
+    assert len(upstreams) == 1
+    assert upstreams[0].config.transport == "stdio"
+    assert upstreams[0].config.env == {
+        "LOG_LEVEL": "info",
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "runtime-secret",
+    }
 
 
 @pytest.mark.asyncio
@@ -740,7 +894,7 @@ async def test_registry_client_resolves_runtime_context_with_local_runner_consum
         server="codex-test1.lightnow/release-smoke",
         version="1.0.1",
         runtime_profile="default",
-        instance_alias="release-smoke-local",
+        alias="release-smoke-local",
     )
 
     with respx.mock(assert_all_called=True) as router:

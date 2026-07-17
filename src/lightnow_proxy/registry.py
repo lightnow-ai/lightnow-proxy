@@ -224,7 +224,7 @@ class RegistryApiClient:
                     server=server_name,
                     version=version,
                     runtime_profile=profile_name,
-                    instance_alias=alias,
+                    alias=alias,
                 )
             )
         return upstreams
@@ -355,7 +355,7 @@ class RegistryApiClient:
                     server=server_name,
                     version=version,
                     runtime_profile=profile_name,
-                    instance_alias=alias,
+                    alias=alias,
                 ),
                 principal,
             )
@@ -441,8 +441,8 @@ class RegistryApiClient:
         params = {
             "profile": upstream.runtime_profile,
         }
-        if upstream.instance_alias:
-            params["alias"] = upstream.instance_alias
+        if upstream.alias:
+            params["alias"] = upstream.alias
         if self.config.include_secrets:
             params["include"] = "secrets"
         if upstream.scope_type is not None:
