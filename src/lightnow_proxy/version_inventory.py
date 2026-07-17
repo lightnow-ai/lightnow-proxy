@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ UPDATE_STATUSES = {"current", "outdated", "ahead", "unknown"}
 def detect_install_method(executable: str | None = None) -> str:
     """Identify supported isolated installers from the executable's resolved path."""
     candidate = Path(executable or sys.argv[0]).expanduser()
+    if not candidate.is_absolute():
+        located = shutil.which(str(candidate))
+        if located is not None:
+            candidate = Path(located)
     try:
         path = str(candidate.resolve()).lower()
     except OSError:
@@ -61,7 +66,7 @@ def _method(value: Any, fallback: str = "unknown") -> str:
 
 
 def heartbeat_version_fields(config: LocalProxyConfig) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Build nullable API fields from local state only; this function never performs I/O beyond one file read."""
+    """Build nullable API fields using local filesystem metadata only, without network or package-manager access."""
     state = load_update_state(config.update_state_path)
     checked_at = _string(state.get("checked_at"))
     cli = _package(state, "lightnow-cli")

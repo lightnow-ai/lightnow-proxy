@@ -1,4 +1,5 @@
 import json
+import sys
 
 from lightnow_proxy.config import LocalProxyConfig
 from lightnow_proxy.version_inventory import detect_install_method, heartbeat_version_fields
@@ -9,6 +10,16 @@ def test_detect_install_method_recognizes_supported_layouts() -> None:
     assert detect_install_method("/home/me/.local/pipx/venvs/lightnow-proxy/bin/lightnow-proxy") == "pipx"
     assert detect_install_method("/home/me/.local/share/uv/tools/lightnow-proxy/bin/lightnow-proxy") == "uv"
     assert detect_install_method("/tmp/venv/bin/lightnow-proxy") == "unknown"
+
+
+def test_detect_install_method_resolves_relative_executable_from_path(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["lightnow-proxy"])
+    monkeypatch.setattr(
+        "lightnow_proxy.version_inventory.shutil.which",
+        lambda executable: "/opt/homebrew/Cellar/lightnow-proxy/1.4.2/bin/lightnow-proxy",
+    )
+
+    assert detect_install_method() == "homebrew"
 
 
 def test_heartbeat_version_fields_prefers_valid_cached_state(tmp_path) -> None:
