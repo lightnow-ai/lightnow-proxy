@@ -747,7 +747,10 @@ def test_runtime_request_metadata_redacts_sensitive_argument_values() -> None:
             "repo": "registry-api",
             "issue_number": 388,
             "apiToken": "must-not-be-stored",
-            "headers": {"Authorization": "Bearer must-not-be-stored"},
+            "headers": {
+                "Authorization": "Bearer must-not-be-stored",
+                "X-API-Key": "must-not-be-stored-either",
+            },
         },
         None,
     )
@@ -757,7 +760,10 @@ def test_runtime_request_metadata_redacts_sensitive_argument_values() -> None:
         "repo": "registry-api",
         "issue_number": 388,
         "apiToken": "[REDACTED]",
-        "headers": {"Authorization": "[REDACTED]"},
+        "headers": {
+            "Authorization": "[REDACTED]",
+            "X-API-Key": "[REDACTED]",
+        },
     }
     assert "must-not-be-stored" not in str(metadata)
 

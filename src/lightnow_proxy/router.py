@@ -855,7 +855,11 @@ def sensitive_argument_key(key: str) -> bool:
     camel_separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
     normalized = re.sub(r"[^a-z0-9]", "", camel_separated.lower())
     parts = {part for part in re.split(r"[^a-z0-9]+", camel_separated.lower()) if part}
-    return normalized in SENSITIVE_ARGUMENT_KEY_PARTS or bool(parts & SENSITIVE_ARGUMENT_KEY_PARTS)
+    return (
+        normalized in SENSITIVE_ARGUMENT_KEY_PARTS
+        or any(normalized.endswith(part) for part in SENSITIVE_ARGUMENT_KEY_PARTS)
+        or bool(parts & SENSITIVE_ARGUMENT_KEY_PARTS)
+    )
 
 
 def codex_client_context(request_meta: Mapping[str, Any]) -> dict[str, Any]:

@@ -125,7 +125,8 @@ to the generic thread/conversation field. Local paths such as Antigravity
 artifact directories are observed only as metadata keys and must not be stored
 as values. Runtime telemetry must not include tool results, resource contents,
 workspace paths, git remotes, commit hashes, resolved LightNow secrets or
-authorization headers.
+unredacted authorization values. Authorization fields may be present only with
+their values replaced by `[REDACTED]`.
 
 ## Status And Active Checks
 

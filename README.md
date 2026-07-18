@@ -137,8 +137,9 @@ are redacted before transmission. The proxy also sends device
 presence immediately at startup and every two minutes. The Control Plane can
 then show which devices, clients and profiles are active, healthy, degraded, or
 failing, along with CLI/Proxy versions and update status. Tool results, resolved
-LightNow secrets, authorization headers, network addresses, hardware identifiers
-and local paths are not stored.
+LightNow secrets, unredacted authorization values, network addresses, hardware
+identifiers and local paths are not stored. Credential-like argument fields,
+including authorization headers, are replaced with `[REDACTED]` before transmission.
 
 Vault providers configured for runtime resolution are resolved on this host,
 after Registry API has returned a provider reference without credentials or a
