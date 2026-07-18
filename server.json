@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "lightnow-proxy",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "runtimeHint": "python",
       "transport": {
         "type": "stdio"
