@@ -27,6 +27,20 @@ class RegistryApiError(Exception):
     pass
 
 
+async def _release_file_lock(lock: FileLock) -> None:
+    release_task = asyncio.create_task(asyncio.to_thread(lock.release))
+    cancelled = False
+    while not release_task.done():
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            cancelled = True
+
+    release_task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def _acquire_file_lock(lock: FileLock) -> None:
     acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire))
     try:
@@ -39,7 +53,7 @@ async def _acquire_file_lock(lock: FileLock) -> None:
                 completed.result()
             except BaseException:
                 return
-            loop.create_task(asyncio.to_thread(lock.release))
+            loop.create_task(_release_file_lock(lock))
 
         acquire_task.add_done_callback(release_if_acquired)
         raise
@@ -560,7 +574,7 @@ class RegistryApiClient:
                 else:
                     logger.info("using CLI session refreshed by another process")
             finally:
-                await asyncio.to_thread(lock.release)
+                await _release_file_lock(lock)
         self._tenant_id = session.tenant_id
         return session
 

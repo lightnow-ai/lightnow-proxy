@@ -20,6 +20,7 @@ from lightnow_proxy.registry import (
     RegistryApiError,
     _acquire_file_lock,
     _cli_session_file_lock,
+    _release_file_lock,
     upstream_config_from_client_config,
     upstream_config_from_runtime_context,
 )
@@ -1357,10 +1358,12 @@ async def test_cancelled_cli_session_lock_acquisition_releases_late_lock(tmp_pat
 @pytest.mark.asyncio
 async def test_cancelled_waiter_does_not_leak_real_cli_session_lock(tmp_path) -> None:
     lock_path = tmp_path / "session.json.lock"
+    acquire_started = threading.Event()
     acquire_succeeded = threading.Event()
 
     class SignallingFileLock(FileLock):
         def acquire(self, *args, **kwargs):
+            acquire_started.set()
             result = super().acquire(*args, **kwargs)
             acquire_succeeded.set()
             return result
@@ -1371,7 +1374,7 @@ async def test_cancelled_waiter_does_not_leak_real_cli_session_lock(tmp_path) ->
 
     try:
         waiter = asyncio.create_task(_acquire_file_lock(waiting_lock))
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(acquire_started.wait, 1)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
@@ -1391,3 +1394,31 @@ async def test_cancelled_waiter_does_not_leak_real_cli_session_lock(tmp_path) ->
             break
     else:
         pytest.fail("cancelled waiter leaked the CLI session lock")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_release_waits_for_real_file_lock_cleanup(tmp_path) -> None:
+    lock_path = tmp_path / "session.json.lock"
+    release_started = threading.Event()
+    allow_release = threading.Event()
+
+    class DelayedReleaseFileLock(FileLock):
+        def release(self, *args, **kwargs):
+            release_started.set()
+            allow_release.wait(timeout=1)
+            return super().release(*args, **kwargs)
+
+    lock = DelayedReleaseFileLock(lock_path, timeout=0.1, thread_local=False)
+    lock.acquire()
+    release_task = asyncio.create_task(_release_file_lock(lock))
+    assert await asyncio.to_thread(release_started.wait, 1)
+
+    release_task.cancel()
+    await asyncio.sleep(0)
+    assert not release_task.done()
+    allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    with FileLock(lock_path, timeout=0.1):
+        pass
