@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
+from pathlib import Path
 import threading
 import time
 
+from filelock import FileLock, Timeout as FileLockTimeout
 import httpx
 import pytest
 import respx
@@ -14,6 +18,9 @@ from lightnow_proxy.registry import (
     CliSession,
     RegistryApiClient,
     RegistryApiError,
+    _acquire_file_lock,
+    _cli_session_file_lock,
+    _release_file_lock,
     upstream_config_from_client_config,
     upstream_config_from_runtime_context,
 )
@@ -123,6 +130,32 @@ def unsigned_token(
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
     return f"{encode(header)}.{encode(payload)}."
+
+
+def write_expired_cli_session(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) - 60),
+                "refresh_token": "refresh-old",
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+                "context_type": "personal",
+            }
+        )
+    )
+
+
+def cli_session_client(path: Path, *, timeout_seconds: float = 2) -> RegistryApiClient:
+    return RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local",
+            use_cli_session=True,
+            cli_config_path=str(path),
+            timeout_seconds=timeout_seconds,
+        )
+    )
 
 
 def test_cli_session_loads_tenant_context(tmp_path) -> None:
@@ -1117,8 +1150,9 @@ async def test_registry_client_refreshes_expired_cli_session(tmp_path, monkeypat
     lock_threads: dict[str, int] = {}
 
     class RecordingFileLock:
-        def __init__(self, _path, timeout):
+        def __init__(self, _path, timeout, *, thread_local):
             self.timeout = timeout
+            lock_threads["thread_local"] = thread_local
 
         def acquire(self):
             lock_threads["acquire"] = threading.get_ident()
@@ -1172,8 +1206,102 @@ async def test_registry_client_refreshes_expired_cli_session(tmp_path, monkeypat
     saved = json.loads(config_path.read_text())
     assert saved["access_token"] == refreshed
     assert saved["refresh_token"] == "refresh-new"
+    assert lock_threads["thread_local"] is False
     assert lock_threads["acquire"] != event_loop_thread
     assert lock_threads["release"] != event_loop_thread
+
+
+def test_cli_session_file_lock_can_be_released_from_another_executor_thread(tmp_path) -> None:
+    lock = _cli_session_file_lock(tmp_path / "session.json", timeout_seconds=0.1)
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as acquire_executor,
+        ThreadPoolExecutor(max_workers=1) as release_executor,
+    ):
+        acquire_executor.submit(lock.acquire).result()
+        release_executor.submit(lock.release).result()
+
+        following_lock = FileLock(lock.lock_file, timeout=0.1)
+        with following_lock:
+            assert following_lock.is_locked
+
+
+@pytest.mark.asyncio
+async def test_concurrent_clients_refresh_shared_expired_cli_session_once(tmp_path) -> None:
+    config_path = tmp_path / "session.json"
+    write_expired_cli_session(config_path)
+    refreshed = unsigned_token(int(time.time()) + 3600)
+    clients = [cli_session_client(config_path) for _ in range(3)]
+
+    with respx.mock(assert_all_called=True) as router:
+        refresh_route = router.post(
+            "https://auth.lightnow.local/realms/lightnow-local/protocol/openid-connect/token"
+        ).respond(
+            200,
+            json={"access_token": refreshed, "refresh_token": "refresh-new"},
+        )
+
+        sessions = await asyncio.gather(*(client._cli_session() for client in clients))
+
+    assert refresh_route.call_count == 1
+    assert [session.access_token for session in sessions] == [refreshed, refreshed, refreshed]
+    with FileLock(f"{config_path}.lock", timeout=0.1):
+        pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("refresh_response", "expected_error"),
+    [
+        (httpx.Response(500), RegistryApiError),
+        (httpx.ReadTimeout("token endpoint timed out"), httpx.ReadTimeout),
+    ],
+)
+async def test_cli_session_refresh_failure_releases_lock(
+    tmp_path,
+    refresh_response,
+    expected_error,
+    caplog,
+) -> None:
+    caplog.set_level(logging.INFO, logger="lightnow_proxy.registry")
+    config_path = tmp_path / "session.json"
+    write_expired_cli_session(config_path)
+    client = cli_session_client(config_path, timeout_seconds=0.1)
+
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.lightnow.local/realms/lightnow-local/protocol/openid-connect/token")
+        if isinstance(refresh_response, Exception):
+            route.mock(side_effect=refresh_response)
+        else:
+            route.mock(return_value=refresh_response)
+
+        with pytest.raises(expected_error):
+            await client._cli_session()
+
+    with FileLock(f"{config_path}.lock", timeout=0.1):
+        pass
+    assert "CLI session refresh failed" in caplog.text
+    assert "refresh-old" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cli_session_lock_timeout_is_reported_and_does_not_poison_following_acquire(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="lightnow_proxy.registry")
+    config_path = tmp_path / "session.json"
+    write_expired_cli_session(config_path)
+    client = cli_session_client(config_path, timeout_seconds=0.05)
+    blocking_lock = FileLock(f"{config_path}.lock", timeout=0.1)
+    blocking_lock.acquire()
+    try:
+        with pytest.raises(RegistryApiError, match="Timed out waiting for another LightNow process"):
+            await client._cli_session()
+    finally:
+        blocking_lock.release()
+
+    with FileLock(f"{config_path}.lock", timeout=0.1):
+        pass
+    assert "timed out waiting for CLI session refresh lock" in caplog.text
+    assert str(config_path) not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1183,8 +1311,9 @@ async def test_cancelled_cli_session_lock_acquisition_releases_late_lock(tmp_pat
     released = threading.Event()
 
     class DelayedFileLock:
-        def __init__(self, _path, timeout):
+        def __init__(self, _path, timeout, *, thread_local):
             self.timeout = timeout
+            assert thread_local is False
 
         def acquire(self):
             acquire_started.set()
@@ -1224,3 +1353,72 @@ async def test_cancelled_cli_session_lock_acquisition_releases_late_lock(tmp_pat
 
     allow_acquire.set()
     assert await asyncio.to_thread(released.wait, 1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_does_not_leak_real_cli_session_lock(tmp_path) -> None:
+    lock_path = tmp_path / "session.json.lock"
+    acquire_started = threading.Event()
+    acquire_succeeded = threading.Event()
+
+    class SignallingFileLock(FileLock):
+        def acquire(self, *args, **kwargs):
+            acquire_started.set()
+            result = super().acquire(*args, **kwargs)
+            acquire_succeeded.set()
+            return result
+
+    blocking_lock = FileLock(lock_path, timeout=0.1)
+    blocking_lock.acquire()
+    waiting_lock = SignallingFileLock(lock_path, timeout=1, thread_local=False)
+
+    try:
+        waiter = asyncio.create_task(_acquire_file_lock(waiting_lock))
+        assert await asyncio.to_thread(acquire_started.wait, 1)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+    finally:
+        blocking_lock.release()
+
+    assert await asyncio.to_thread(acquire_succeeded.wait, 1)
+    deadline = asyncio.get_running_loop().time() + 1
+    following_lock = FileLock(lock_path, timeout=0)
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            following_lock.acquire()
+        except FileLockTimeout:
+            await asyncio.sleep(0.01)
+        else:
+            following_lock.release()
+            break
+    else:
+        pytest.fail("cancelled waiter leaked the CLI session lock")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_release_waits_for_real_file_lock_cleanup(tmp_path) -> None:
+    lock_path = tmp_path / "session.json.lock"
+    release_started = threading.Event()
+    allow_release = threading.Event()
+
+    class DelayedReleaseFileLock(FileLock):
+        def release(self, *args, **kwargs):
+            release_started.set()
+            allow_release.wait(timeout=1)
+            return super().release(*args, **kwargs)
+
+    lock = DelayedReleaseFileLock(lock_path, timeout=0.1, thread_local=False)
+    lock.acquire()
+    release_task = asyncio.create_task(_release_file_lock(lock))
+    assert await asyncio.to_thread(release_started.wait, 1)
+
+    release_task.cancel()
+    await asyncio.sleep(0)
+    assert not release_task.done()
+    allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    with FileLock(lock_path, timeout=0.1):
+        pass
