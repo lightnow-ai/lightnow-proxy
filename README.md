@@ -130,13 +130,16 @@ shows their non-secret connection alias, ID, account label, scope, profile and
 identity-binding status. Legacy configs that use `cli_config_path` remain
 readable, but are restricted to the configured authentication issuer.
 
-When telemetry is enabled, active health checks are sent to the LightNow
-Control Plane as metadata-only proxy health events. The proxy also sends device
+When telemetry is enabled, active health checks and runtime events are sent to
+the LightNow Control Plane. Tool-call arguments are captured by default and can
+be disabled independently in the Local Proxy settings. Credential-like fields
+are redacted before transmission. The proxy also sends device
 presence immediately at startup and every two minutes. The Control Plane can
 then show which devices, clients and profiles are active, healthy, degraded, or
-failing, along with CLI/Proxy versions and update status, without storing
-secrets, tool arguments, response bodies, network addresses, hardware
-identifiers, or local paths.
+failing, along with CLI/Proxy versions and update status. Tool results, resolved
+LightNow secrets, unredacted authorization values, network addresses, hardware
+identifiers and local paths are not stored. Credential-like argument fields,
+including authorization headers, are replaced with `[REDACTED]` before transmission.
 
 Vault providers configured for runtime resolution are resolved on this host,
 after Registry API has returned a provider reference without credentials or a

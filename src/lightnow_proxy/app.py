@@ -277,6 +277,7 @@ async def status(_request: Request, config: ProxyConfig, router: ToolRouter) -> 
                 "client_version": config.local_proxy.client_version,
                 "client_transport": config.local_proxy.client_transport,
                 "telemetry_enabled": config.local_proxy.telemetry_enabled,
+                "capture_tool_arguments": config.local_proxy.capture_tool_arguments,
                 "policy_mode": config.local_proxy.policy_mode,
                 "allow_unmanaged_client_servers": config.local_proxy.allow_unmanaged_client_servers,
                 "device_heartbeat": device_heartbeat_status(router),

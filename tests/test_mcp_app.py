@@ -205,6 +205,7 @@ async def test_status_reports_non_secret_local_proxy_runtime_state() -> None:
     assert payload["local_proxy"]["policy_mode"] == "enforce"
     assert payload["local_proxy"]["allow_unmanaged_client_servers"] is False
     assert payload["local_proxy"]["telemetry_enabled"] is True
+    assert payload["local_proxy"]["capture_tool_arguments"] is True
     assert payload["registry_api"]["enabled"] is True
     assert payload["registry_api"]["use_cli_session"] is True
     assert payload["profiles"] == ["admins", "users"]

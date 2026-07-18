@@ -526,7 +526,7 @@ async def test_router_resolves_only_target_lightnow_upstream_for_tool_calls() ->
 
 
 @pytest.mark.asyncio
-async def test_router_emits_call_tool_event_without_arguments() -> None:
+async def test_router_emits_call_tool_event_with_arguments_by_default() -> None:
     class FakeRegistryClient:
         def __init__(self) -> None:
             self.events: list[dict] = []
@@ -538,7 +538,7 @@ async def test_router_emits_call_tool_event_without_arguments() -> None:
         async def call_tool(self, config: UpstreamConfig, tool_name: str, arguments: dict | None):
             assert str(config.url) == "https://grafana.example.test/mcp"
             assert tool_name == "query"
-            assert arguments == {"token": "must-stay-local", "query": "up"}
+            assert arguments == {"owner": "lightnow-ai", "repo": "registry-api", "issue_number": 388}
             from mcp.types import CallToolResult, TextContent
 
             return CallToolResult(content=[TextContent(type="text", text="ok")])
@@ -558,7 +558,7 @@ async def test_router_emits_call_tool_event_without_arguments() -> None:
     result = await router.call_tool(
         "default",
         "grafana__query",
-        {"token": "must-stay-local", "query": "up"},
+        {"owner": "lightnow-ai", "repo": "registry-api", "issue_number": 388},
         {
             "threadId": "thread-1",
             "progressToken": "progress-1",
@@ -593,7 +593,13 @@ async def test_router_emits_call_tool_event_without_arguments() -> None:
     assert event["runner_name"] == "lightnow-local-proxy"
     assert event["mcp_method"] == "tools/call"
     assert event["upstream_transport"] == "streamable-http"
-    assert event["argument_keys"] == ["query", "token"]
+    assert event["argument_keys"] == ["issue_number", "owner", "repo"]
+    assert event["arguments"] == {
+        "owner": "lightnow-ai",
+        "repo": "registry-api",
+        "issue_number": 388,
+    }
+    assert event["arguments_captured"] is True
     assert event["request_meta_keys"] == ["progressToken", "threadId", "x-codex-turn-metadata"]
     assert event["mcp_thread_id"] == "thread-1"
     assert event["client_context_session_id"] == "session-1"
@@ -616,8 +622,51 @@ async def test_router_emits_call_tool_event_without_arguments() -> None:
     assert event["request_bytes"] > 0
     assert event["response_items_count"] == 1
     assert event["response_bytes"] > 0
-    assert "arguments" not in registry_client.events[0]
-    assert "must-stay-local" not in str(registry_client.events[0])
+
+
+@pytest.mark.asyncio
+async def test_router_can_disable_tool_argument_capture_without_disabling_telemetry() -> None:
+    class FakeRegistryClient:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def post_runtime_event(self, payload: dict[str, object]) -> None:
+            self.events.append(payload)
+
+    class FakeUpstreamClient:
+        async def call_tool(
+            self, config: UpstreamConfig, tool_name: str, arguments: dict[str, object]
+        ) -> CallToolResult:
+            return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
+
+    config = ProxyConfig(
+        server=ServerConfig(),
+        local_proxy={
+            "enabled": True,
+            "profile": "default",
+            "client_name": "codex",
+            "capture_tool_arguments": False,
+        },
+        auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
+        registry_api=RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test"),
+        profiles={"default": ProfileConfig(required_groups=[], upstreams=["github"])},
+        upstreams={"github": UpstreamConfig(url="https://github.example.test/mcp")},
+    )
+    router = ToolRouter(config, upstream_client=FakeUpstreamClient())
+    registry_client = FakeRegistryClient()
+    router.registry_client = registry_client
+
+    await router.call_tool(
+        "default",
+        "github__issue_read",
+        {"owner": "lightnow-ai", "repo": "registry-api", "issue_number": 388},
+    )
+
+    event = registry_client.events[0]
+    assert event["argument_keys"] == ["issue_number", "owner", "repo"]
+    assert event["arguments_captured"] is False
+    assert "arguments" not in event
+    assert "lightnow-ai" not in str(event)
 
 
 @pytest.mark.asyncio
@@ -689,6 +738,34 @@ def test_antigravity_context_does_not_override_standard_mcp_thread_id() -> None:
 
     assert metadata["mcp_thread_id"] == "mcp-thread"
     assert metadata["client_context_thread_id"] == "antigravity-conversation"
+
+
+def test_runtime_request_metadata_redacts_sensitive_argument_values() -> None:
+    metadata = runtime_request_metadata(
+        {
+            "owner": "lightnow-ai",
+            "repo": "registry-api",
+            "issue_number": 388,
+            "apiToken": "must-not-be-stored",
+            "headers": {
+                "Authorization": "Bearer must-not-be-stored",
+                "X-API-Key": "must-not-be-stored-either",
+            },
+        },
+        None,
+    )
+
+    assert metadata["arguments"] == {
+        "owner": "lightnow-ai",
+        "repo": "registry-api",
+        "issue_number": 388,
+        "apiToken": "[REDACTED]",
+        "headers": {
+            "Authorization": "[REDACTED]",
+            "X-API-Key": "[REDACTED]",
+        },
+    }
+    assert "must-not-be-stored" not in str(metadata)
 
 
 @pytest.mark.asyncio
