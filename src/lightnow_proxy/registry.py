@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -12,12 +13,14 @@ from urllib.parse import quote
 
 import httpx
 import jwt
-from filelock import FileLock
+from filelock import FileLock, Timeout as FileLockTimeout
 from pydantic import ValidationError
 
 from lightnow_proxy.auth import Principal
 from lightnow_proxy.config import RegistryApiConfig, RuntimeUpstreamConfig, UpstreamConfig
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
+
+logger = logging.getLogger(__name__)
 
 
 class RegistryApiError(Exception):
@@ -40,6 +43,12 @@ async def _acquire_file_lock(lock: FileLock) -> None:
 
         acquire_task.add_done_callback(release_if_acquired)
         raise
+
+
+def _cli_session_file_lock(path: Path, timeout_seconds: float) -> FileLock:
+    # Acquisition and release run in separate executor calls. FileLock's default
+    # thread-local context cannot release an OS lock from a different worker.
+    return FileLock(f"{path}.lock", timeout=timeout_seconds, thread_local=False)
 
 
 @dataclass(frozen=True)
@@ -516,15 +525,40 @@ class RegistryApiClient:
         session = CliSession.load(path)
         self._validate_cli_session_binding(session)
         if session.access_token_expired():
-            lock = FileLock(f"{path}.lock", timeout=self.config.timeout_seconds)
-            await _acquire_file_lock(lock)
+            lock = _cli_session_file_lock(path, self.config.timeout_seconds)
+            logger.info("waiting for CLI session refresh lock")
+            try:
+                await _acquire_file_lock(lock)
+            except FileLockTimeout as exc:
+                logger.warning("timed out waiting for CLI session refresh lock")
+                raise RegistryApiError(
+                    "Timed out waiting for another LightNow process to refresh the CLI session."
+                ) from exc
+            except asyncio.CancelledError:
+                logger.info("cancelled while waiting for CLI session refresh lock")
+                raise
             try:
                 session = CliSession.load(path)
                 self._validate_cli_session_binding(session)
                 if session.access_token_expired():
-                    session = await refresh_cli_session(session, self.config.timeout_seconds, verify=self._verify())
+                    logger.info("refreshing expired CLI session")
+                    try:
+                        session = await refresh_cli_session(
+                            session,
+                            self.config.timeout_seconds,
+                            verify=self._verify(),
+                        )
+                    except asyncio.CancelledError:
+                        logger.info("CLI session refresh cancelled")
+                        raise
+                    except Exception as exc:
+                        logger.warning("CLI session refresh failed: %s", type(exc).__name__)
+                        raise
                     self._validate_cli_session_binding(session)
                     session.save(path)
+                    logger.info("CLI session refresh completed")
+                else:
+                    logger.info("using CLI session refreshed by another process")
             finally:
                 await asyncio.to_thread(lock.release)
         self._tenant_id = session.tenant_id
