@@ -86,7 +86,7 @@ the active LightNow MCP configuration at runtime.
 
 ## Runtime Telemetry
 
-Runtime telemetry is metadata-only. The proxy emits events for:
+Runtime telemetry emits events for:
 
 - runner lifecycle start/stop
 - `tools/list`
@@ -110,16 +110,21 @@ using a profile.
 
 Events may include method, status, duration, upstream transport, server alias,
 tool name, resource URI, response item count, request/response byte counts,
-MIME/content type and error type. Tool-call events may include top-level
-argument key names, MCP request metadata keys and normalized client context.
+MIME/content type and error type. Tool-call events include top-level argument
+key names and, by default, their argument values. Users can opt out of argument
+value capture in the LightNow Local Proxy settings without disabling runtime
+events or device presence. MCP request metadata keys and normalized client
+context may also be included. Values under credential-like keys such as tokens,
+passwords, secrets and authorization fields are replaced with `[REDACTED]`
+before an event leaves the proxy.
 Client-specific metadata is translated through adapters before it reaches
 Registry API. Codex `x-codex-turn-metadata` maps to generic session, thread,
 turn, model, reasoning and sandbox fields while still filling legacy `codex_*`
 fields for compatibility. Antigravity `antigravity.google/conversation_id` maps
 to the generic thread/conversation field. Local paths such as Antigravity
 artifact directories are observed only as metadata keys and must not be stored
-as values. Runtime telemetry must not include tool arguments, tool results,
-resource contents, workspace paths, git remotes, commit hashes, secrets or
+as values. Runtime telemetry must not include tool results, resource contents,
+workspace paths, git remotes, commit hashes, resolved LightNow secrets or
 authorization headers.
 
 ## Status And Active Checks

@@ -35,6 +35,7 @@ class LocalProxyConfig(BaseModel):
     runner_version: str = __version__
     client_transport: Literal["stdio", "streamable-http"] | None = None
     telemetry_enabled: bool = True
+    capture_tool_arguments: bool = True
     policy_mode: Literal["observe", "enforce"] = "observe"
     allow_unmanaged_client_servers: bool = True
     tool_cache_enabled: bool = True

@@ -25,6 +25,21 @@ from lightnow_proxy.version_inventory import heartbeat_version_fields
 
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
+REDACTED_ARGUMENT_VALUE = "[REDACTED]"
+SENSITIVE_ARGUMENT_KEY_PARTS = {
+    "apikey",
+    "auth",
+    "authorization",
+    "bearer",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "privatekey",
+    "secret",
+    "token",
+}
 
 
 class ToolRoutingError(Exception):
@@ -329,7 +344,11 @@ class ToolRouter:
                     "original_tool_name": routed.original_name if routed else None,
                     "duration_ms": self._duration_ms(started),
                     "request_bytes": tool_arguments_size(arguments),
-                    **runtime_request_metadata(arguments, request_meta),
+                    **runtime_request_metadata(
+                        arguments,
+                        request_meta,
+                        capture_arguments=self.config.local_proxy.capture_tool_arguments,
+                    ),
                     "error_type": error_type_name(exc),
                     "error_message": error_message(exc),
                 }
@@ -571,7 +590,11 @@ class ToolRouter:
                 "original_tool_name": routed.original_name,
                 "duration_ms": self._duration_ms(started),
                 "request_bytes": tool_arguments_size(arguments),
-                **runtime_request_metadata(arguments, request_meta),
+                **runtime_request_metadata(
+                    arguments,
+                    request_meta,
+                    capture_arguments=self.config.local_proxy.capture_tool_arguments,
+                ),
                 "upstream_transport": upstream.config.transport if upstream else None,
                 "response_items_count": len(result.content),
                 "response_bytes": call_tool_result_size(result),
@@ -781,10 +804,18 @@ def tool_arguments_size(arguments: dict[str, Any] | None) -> int:
     return len(json.dumps(arguments or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
 
 
-def runtime_request_metadata(arguments: dict[str, Any] | None, request_meta: dict[str, Any] | None) -> dict[str, Any]:
+def runtime_request_metadata(
+    arguments: dict[str, Any] | None,
+    request_meta: dict[str, Any] | None,
+    *,
+    capture_arguments: bool = True,
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "argument_keys": sorted((arguments or {}).keys()),
+        "arguments_captured": capture_arguments,
     }
+    if capture_arguments:
+        metadata["arguments"] = sanitize_runtime_arguments(arguments or {})
     if not isinstance(request_meta, dict):
         return metadata
 
@@ -801,6 +832,30 @@ def runtime_request_metadata(arguments: dict[str, Any] | None, request_meta: dic
     metadata.update(antigravity_context)
 
     return metadata
+
+
+def sanitize_runtime_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: sanitize_runtime_argument_value(value, key=key) for key, value in arguments.items()}
+
+
+def sanitize_runtime_argument_value(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and sensitive_argument_key(key):
+        return REDACTED_ARGUMENT_VALUE
+    if isinstance(value, Mapping):
+        return {
+            str(nested_key): sanitize_runtime_argument_value(nested_value, key=str(nested_key))
+            for nested_key, nested_value in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_runtime_argument_value(item) for item in value]
+    return value
+
+
+def sensitive_argument_key(key: str) -> bool:
+    camel_separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    normalized = re.sub(r"[^a-z0-9]", "", camel_separated.lower())
+    parts = {part for part in re.split(r"[^a-z0-9]+", camel_separated.lower()) if part}
+    return normalized in SENSITIVE_ARGUMENT_KEY_PARTS or bool(parts & SENSITIVE_ARGUMENT_KEY_PARTS)
 
 
 def codex_client_context(request_meta: Mapping[str, Any]) -> dict[str, Any]:
