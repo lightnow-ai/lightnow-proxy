@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.5.0...v1.6.0) (2026-07-18)
+
+
+### Features
+
+* **#19:** capture sanitized runtime tool arguments ([ccbe870](https://github.com/lightnow-ai/lightnow-proxy/commit/ccbe870b23ccafb5468bde320096296773960302))
+* **telemetry:** capture tool arguments ([437aa1c](https://github.com/lightnow-ai/lightnow-proxy/commit/437aa1c7e6542cb3233706879b4441e2d9e463f6))
+
+
+### Bug Fixes
+
+* **#18:** leaked CLI session lock during concurrent token refresh ([20008e5](https://github.com/lightnow-ai/lightnow-proxy/commit/20008e5d45e9527882b9bfaf7566bf29f360f7df))
+* **auth:** make session lock cleanup cancellation-safe ([c0d9596](https://github.com/lightnow-ai/lightnow-proxy/commit/c0d95962d932f76509520446e90962ed614ac20f))
+* **auth:** prevent leaked CLI session refresh locks ([3ddafc3](https://github.com/lightnow-ai/lightnow-proxy/commit/3ddafc349e8a7b007a6c4fe6e11f8a2d913fb4b3))
+* **telemetry:** harden argument redaction ([7a13c89](https://github.com/lightnow-ai/lightnow-proxy/commit/7a13c8942c6cecbfaa8f7c2f1cd44bc5506a1a96))
+
 ## [1.5.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.4.2...v1.5.0) (2026-07-17)
 
 
