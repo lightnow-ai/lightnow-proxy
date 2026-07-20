@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.lightnow-ai/lightnow-proxy",
-  "title": "LightNow Secure MCP Gateway",
-  "description": "Securely connect AI clients to your team's approved MCP servers—no copied configs or secrets.",
+  "title": "LightNow MCP Proxy",
+  "description": "Connect your AI clients with your favorite MCP servers—securely managed from one place.",
   "icons": [
     {
       "src": "https://docs.lightnow.ai/favicon-192x192.png",

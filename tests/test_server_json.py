@@ -51,9 +51,9 @@ def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> Non
     listing = load_listing()
     serialized = json.dumps(listing).lower()
 
-    assert listing["title"] == "LightNow Secure MCP Gateway"
+    assert listing["title"] == "LightNow MCP Proxy"
     assert listing["description"] == (
-        "Securely connect AI clients to your team's approved MCP servers—no copied configs or secrets."
+        "Connect your AI clients with your favorite MCP servers—securely managed from one place."
     )
     assert 1 <= len(listing["description"]) <= 100
     assert "echo__echo" not in serialized
