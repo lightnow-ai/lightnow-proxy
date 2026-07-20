@@ -53,7 +53,7 @@ def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> Non
 
     assert listing["title"] == "LightNow MCP Proxy"
     assert listing["description"] == (
-        "Connect your AI clients with your favorite MCP servers—securely managed from one place."
+        "Connect your AI clients with your favorite MCP servers - securely managed from one place."
     )
     assert 1 <= len(listing["description"]) <= 100
     assert "echo__echo" not in serialized
