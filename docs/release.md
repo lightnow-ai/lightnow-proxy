@@ -47,15 +47,24 @@ Before publishing the Registry listing:
    ```bash
    mcp-publisher validate
    ```
-6. Authenticate with the Registry:
+6. Verify the published package with the official MCP Inspector CLI. The two
+   `--` separators keep Inspector options separate from Proxy options:
+   ```bash
+   npx -y @modelcontextprotocol/inspector@latest \
+     --cli --method tools/list uvx -- -- \
+     lightnow-proxy@1.6.0 \
+     --config ~/.lightnow/lightnow-proxy/default.yaml \
+     --transport stdio
+   ```
+7. Authenticate with the Registry:
    ```bash
    mcp-publisher login github
    ```
-7. Publish from the repository root:
+8. Publish from the repository root:
    ```bash
    mcp-publisher publish
    ```
-8. Verify the published metadata:
+9. Verify the published metadata:
    ```bash
    curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.lightnow-ai/lightnow-proxy"
    ```

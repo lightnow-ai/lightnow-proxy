@@ -19,6 +19,12 @@ def test_registry_listing_matches_package_release() -> None:
 
     assert listing["name"] == "io.github.lightnow-ai/lightnow-proxy"
     assert listing["version"] == __version__
+    assert listing["repository"] == {
+        "url": "https://github.com/lightnow-ai/lightnow-proxy",
+        "source": "github",
+        "id": "1291018077",
+    }
+    assert listing["websiteUrl"] == "https://docs.lightnow.ai/getting-started/sync-mcp-clients/"
     assert package["registryType"] == "pypi"
     assert package["registryBaseUrl"] == "https://pypi.org"
     assert package["identifier"] == "lightnow-proxy"
@@ -35,8 +41,10 @@ def test_registry_listing_requires_a_real_lightnow_profile() -> None:
 
     assert config_argument["isRequired"] is True
     assert config_argument["format"] == "filepath"
+    assert config_argument["placeholder"] == "~/.lightnow/lightnow-proxy/default.yaml"
     assert "lightnow sync" in config_argument["description"]
     assert transport_argument["value"] == "stdio"
+    assert [argument["name"] for argument in package_arguments] == ["--config", "--transport"]
 
 
 def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> None:
@@ -44,7 +52,9 @@ def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> Non
     serialized = json.dumps(listing).lower()
 
     assert listing["title"] == "LightNow Secure MCP Gateway"
+    assert listing["description"] == (
+        "Securely connect AI clients to your team's approved MCP servers—no copied configs or secrets."
+    )
     assert 1 <= len(listing["description"]) <= 100
-    assert "profile" in listing["description"].lower()
     assert "echo__echo" not in serialized
     assert "synthetic" not in serialized
