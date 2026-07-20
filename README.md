@@ -1,13 +1,13 @@
-# LightNow Secure MCP Gateway
+# LightNow MCP Proxy
 
 <!-- mcp-name: io.github.lightnow-ai/lightnow-proxy -->
 
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
 
-**Securely connect AI clients to your team's approved MCP servers—no copied
-configs or secrets.**
+**Connect your AI clients with your favorite MCP servers—securely managed from
+one place.**
 
-The LightNow Secure MCP Gateway is the local runtime behind LightNow profiles.
+The LightNow MCP Proxy is the local runtime behind LightNow profiles.
 Connect Codex, Claude Desktop, Cursor, VS Code, or Antigravity once, then manage
 the MCP servers available to that client in LightNow instead of copying server
 configuration and secrets into every tool.
@@ -26,7 +26,7 @@ tool and resource requests to the profile's MCP servers.
 
 ## Capabilities come from your LightNow profile
 
-The gateway deliberately does not ship demo tools. Its MCP capabilities are
+The proxy deliberately does not ship demo tools. Its MCP capabilities are
 the real tools and resources exposed by the servers selected in the active
 LightNow profile, so the list differs between teams and clients. Names such as
 `github__create_issue` identify both the upstream server and its tool and avoid
