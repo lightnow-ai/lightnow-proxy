@@ -1,20 +1,38 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.lightnow-ai/lightnow-proxy",
-  "title": "LightNow Local Proxy",
-  "description": "Route MCP clients through LightNow-managed local proxy profiles.",
+  "title": "LightNow MCP Proxy",
+  "description": "Connect your AI clients with your favorite MCP servers - securely managed from one place.",
+  "icons": [
+    {
+      "src": "https://docs.lightnow.ai/favicon-192x192.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "192x192"
+      ]
+    },
+    {
+      "src": "https://docs.lightnow.ai/favicon-512x512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/lightnow-ai/lightnow-proxy",
-    "source": "github"
+    "source": "github",
+    "id": "1291018077"
   },
-  "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients",
+  "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients/",
   "version": "1.6.0",
   "packages": [
     {
       "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
       "identifier": "lightnow-proxy",
       "version": "1.6.0",
-      "runtimeHint": "python",
+      "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
       },
@@ -22,8 +40,9 @@
         {
           "type": "named",
           "name": "--config",
-          "description": "Path to the LightNow-generated Local Proxy config file.",
+          "description": "Run `lightnow sync --client <client> --local-proxy` first, then select the generated proxy YAML for this client.",
           "format": "filepath",
+          "placeholder": "~/.lightnow/lightnow-proxy/default.yaml",
           "isRequired": true
         },
         {

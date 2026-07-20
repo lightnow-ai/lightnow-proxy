@@ -36,20 +36,35 @@ present in the PyPI long description:
 Before publishing the Registry listing:
 
 1. Ensure `server.json` version and package version match `pyproject.toml`.
-2. Ensure the referenced PyPI version is already published.
-3. Install the official publisher:
+2. Ensure the listing explains that capabilities come from the selected
+   LightNow profile; never publish fixture or demo tools as Proxy capabilities.
+3. Ensure the referenced PyPI version is already published.
+4. Install the official publisher:
    ```bash
    brew install mcp-publisher
    ```
-4. Authenticate with the Registry:
+5. Validate the listing without publishing:
+   ```bash
+   mcp-publisher validate
+   ```
+6. Verify the published package with the official MCP Inspector CLI. The two
+   `--` separators keep Inspector options separate from Proxy options:
+   ```bash
+   npx -y @modelcontextprotocol/inspector@latest \
+     --cli --method tools/list uvx -- -- \
+     lightnow-proxy@1.6.0 \
+     --config ~/.lightnow/lightnow-proxy/default.yaml \
+     --transport stdio
+   ```
+7. Authenticate with the Registry:
    ```bash
    mcp-publisher login github
    ```
-5. Publish from the repository root:
+8. Publish from the repository root:
    ```bash
    mcp-publisher publish
    ```
-6. Verify the published metadata:
+9. Verify the published metadata:
    ```bash
    curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.lightnow-ai/lightnow-proxy"
    ```

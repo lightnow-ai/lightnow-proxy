@@ -1,16 +1,36 @@
-# LightNow Local Proxy
+# LightNow MCP Proxy
 
 <!-- mcp-name: io.github.lightnow-ai/lightnow-proxy -->
 
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
 
-The **LightNow Local Proxy** lets local MCP clients use one LightNow-managed
-MCP entry instead of storing every MCP server configuration and secret in every
-client.
+**Connect your AI clients with your favorite MCP servers - securely managed from
+one place.**
 
-It runs on your machine, uses your LightNow CLI login session, resolves the MCP
-servers enabled for your selected LightNow profile, and forwards tool/resource
-requests to local `stdio` or reachable Streamable HTTP MCP servers.
+The LightNow MCP Proxy is the local runtime behind LightNow profiles.
+Connect Codex, Claude Desktop, Cursor, VS Code, or Antigravity once, then manage
+the MCP servers available to that client in LightNow instead of copying server
+configuration and secrets into every tool.
+
+- Keep MCP access organized in personal and organization profiles.
+- Connect local `stdio` and remote Streamable HTTP servers through one entry.
+- Resolve credentials on the user's machine instead of embedding them in MCP
+  client configuration.
+- Apply profile and policy changes without rebuilding every client setup.
+- Observe client, profile, server health, and tool usage without collecting tool
+  results or resolved secrets.
+
+The installed command remains `lightnow-proxy`. It runs locally, uses the
+identity-bound LightNow CLI session, resolves the selected profile, and routes
+tool and resource requests to the profile's MCP servers.
+
+## Capabilities come from your LightNow profile
+
+The proxy deliberately does not ship demo tools. Its MCP capabilities are
+the real tools and resources exposed by the servers selected in the active
+LightNow profile, so the list differs between teams and clients. Names such as
+`github__create_issue` identify both the upstream server and its tool and avoid
+collisions when several servers use the same tool name.
 
 ## Install
 
