@@ -4,8 +4,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
 
-**One secure connection from your AI clients to every MCP server your team has
-approved.**
+**Securely connect AI clients to your team's approved MCP servers—no copied
+configs or secrets.**
 
 The LightNow Secure MCP Gateway is the local runtime behind LightNow profiles.
 Connect Codex, Claude Desktop, Cursor, VS Code, or Antigravity once, then manage

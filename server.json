@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.lightnow-ai/lightnow-proxy",
   "title": "LightNow Secure MCP Gateway",
-  "description": "One secure connection from AI clients to the MCP servers approved for your LightNow profile.",
+  "description": "Securely connect AI clients to your team's approved MCP servers—no copied configs or secrets.",
   "icons": [
     {
       "src": "https://docs.lightnow.ai/favicon-192x192.png",
@@ -21,9 +21,10 @@
   ],
   "repository": {
     "url": "https://github.com/lightnow-ai/lightnow-proxy",
-    "source": "github"
+    "source": "github",
+    "id": "1291018077"
   },
-  "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients",
+  "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients/",
   "version": "1.6.0",
   "packages": [
     {
@@ -39,7 +40,7 @@
         {
           "type": "named",
           "name": "--config",
-          "description": "Configuration created by `lightnow sync --client <client> --local-proxy`; selects the LightNow account, profile, and approved MCP servers for this client.",
+          "description": "Run `lightnow sync --client <client> --local-proxy` first, then select the generated proxy YAML for this client.",
           "format": "filepath",
           "placeholder": "~/.lightnow/lightnow-proxy/default.yaml",
           "isRequired": true
