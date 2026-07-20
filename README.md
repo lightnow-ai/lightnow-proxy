@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
 
-**Connect your AI clients with your favorite MCP servers—securely managed from
+**Connect your AI clients with your favorite MCP servers - securely managed from
 one place.**
 
 The LightNow MCP Proxy is the local runtime behind LightNow profiles.
