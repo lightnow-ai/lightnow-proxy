@@ -1,8 +1,24 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.lightnow-ai/lightnow-proxy",
-  "title": "LightNow Local Proxy",
-  "description": "Route MCP clients through LightNow-managed local proxy profiles.",
+  "title": "LightNow Secure MCP Gateway",
+  "description": "One secure connection from AI clients to the MCP servers approved for your LightNow profile.",
+  "icons": [
+    {
+      "src": "https://docs.lightnow.ai/favicon-192x192.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "192x192"
+      ]
+    },
+    {
+      "src": "https://docs.lightnow.ai/favicon-512x512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/lightnow-ai/lightnow-proxy",
     "source": "github"
@@ -12,9 +28,10 @@
   "packages": [
     {
       "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
       "identifier": "lightnow-proxy",
       "version": "1.6.0",
-      "runtimeHint": "python",
+      "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
       },
@@ -22,8 +39,9 @@
         {
           "type": "named",
           "name": "--config",
-          "description": "Path to the LightNow-generated Local Proxy config file.",
+          "description": "Configuration created by `lightnow sync --client <client> --local-proxy`; selects the LightNow account, profile, and approved MCP servers for this client.",
           "format": "filepath",
+          "placeholder": "~/.lightnow/lightnow-proxy/default.yaml",
           "isRequired": true
         },
         {
