@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 import socket
 import sys
 from typing import Any, AsyncIterator
@@ -803,7 +804,17 @@ async def test_modern_discovery_is_stateless() -> None:
 
     assert response.status_code == 200
     assert response.headers.get("mcp-session-id") is None
-    assert "2026-07-28" in response.text
+    if response.headers["content-type"].startswith("text/event-stream"):
+        data = next(line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: "))
+        payload = json.loads(data)
+    else:
+        payload = response.json()
+    result = payload["result"]
+    assert result["resultType"] == "complete"
+    assert result["supportedVersions"] == ["2026-07-28"]
+    assert result["ttlMs"] == 0
+    assert result["cacheScope"] == "private"
+    assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "lightnow-local-proxy"
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1058,7 @@ if __name__ == "__main__":
 
 
 @pytest.mark.asyncio
-async def test_stdio_upstream_falls_back_to_legacy_initialize(tmp_path) -> None:
+async def test_stdio_upstream_falls_back_on_unrecognized_discovery_error(tmp_path) -> None:
     server = tmp_path / "legacy_echo_server.py"
     server.write_text(
         """
@@ -1062,7 +1073,7 @@ for line in sys.stdin:
         response = {
             "jsonrpc": "2.0",
             "id": request_id,
-            "error": {"code": -32601, "message": "Method not found"},
+            "error": {"code": -32000, "message": "Legacy server error"},
         }
     elif method == "initialize":
         response = {
