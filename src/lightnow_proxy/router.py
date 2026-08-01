@@ -19,7 +19,7 @@ from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
 from lightnow_proxy.registry import RegistryApiClient
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
-from lightnow_proxy.request_context import get_current_principal
+from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
 from lightnow_proxy.upstream import UpstreamMCPClient
 from lightnow_proxy.version_inventory import heartbeat_version_fields
 
@@ -162,6 +162,7 @@ class ToolRouter:
                     continue
                 for tool in upstream_tools:
                     tools.append(prefix_tool(upstream_name, tool))
+            tools.sort(key=lambda item: item.name)
             await self._emit_runtime_event(
                 {
                     "profile": profile_name,
@@ -307,7 +308,7 @@ class ToolRouter:
                     content=[
                         TextContent(type="text", text=f"Tool {proxied_tool_name!r} is not available in this profile.")
                     ],
-                    isError=True,
+                    is_error=True,
                 )
                 await self._emit_call_event(
                     profile_name,
@@ -370,6 +371,7 @@ class ToolRouter:
                     continue
                 for resource in upstream_resources:
                     resources.append(prefix_resource(upstream_name, resource))
+            resources.sort(key=lambda item: (str(item.uri), item.name))
             await self._emit_runtime_event(
                 {
                     "profile": profile_name,
@@ -412,6 +414,7 @@ class ToolRouter:
                     continue
                 for template in upstream_templates:
                     templates.append(prefix_resource_template(upstream_name, template))
+            templates.sort(key=lambda item: (item.uri_template, item.name))
             await self._emit_runtime_event(
                 {
                     "profile": profile_name,
@@ -583,7 +586,7 @@ class ToolRouter:
             {
                 "profile": profile_name,
                 "event_type": "call_tool",
-                "status": "error" if result.isError else "success",
+                "status": "error" if result.is_error else "success",
                 "server_alias": routed.upstream_name,
                 "server_name": upstream.server_name if upstream else None,
                 "tool_name": proxied_tool_name,
@@ -605,8 +608,11 @@ class ToolRouter:
     async def _emit_runtime_event(self, payload: dict[str, Any]) -> None:
         if self.registry_client is None or not self.config.local_proxy.telemetry_enabled:
             return
-        client_name = self.client_context.name or self.config.local_proxy.client_name
-        client_version = self.client_context.version or self.config.local_proxy.client_version
+        request_client = get_current_mcp_client_context() or {}
+        client_name = request_client.get("name") or self.client_context.name or self.config.local_proxy.client_name
+        client_version = (
+            request_client.get("version") or self.client_context.version or self.config.local_proxy.client_version
+        )
         event = {
             key: value
             for key, value in {
@@ -740,12 +746,12 @@ class ToolRouter:
 
 
 def prefix_tool(upstream_name: str, tool: Tool) -> Tool:
-    data = tool.model_dump(exclude_none=True)
+    data = tool.model_dump(exclude_none=True, by_alias=True)
     data = copy.deepcopy(data)
     data["name"] = f"{upstream_name}__{tool.name}"
     description = data.get("description") or ""
     data["description"] = f"[{upstream_name}] {description}".strip()
-    meta = dict(data.get("meta") or data.get("_meta") or {})
+    meta = dict(data.get("_meta") or {})
     meta["lightnow_proxy_upstream"] = upstream_name
     meta["lightnow_proxy_original_name"] = tool.name
     data["_meta"] = meta
@@ -772,7 +778,7 @@ def prefix_resource_template(upstream_name: str, template: ResourceTemplate) -> 
     data["name"] = f"{upstream_name} / {template.name}"
     meta = dict(data.get("_meta") or {})
     meta["lightnow_proxy_upstream"] = upstream_name
-    meta["lightnow_proxy_original_uri_template"] = template.uriTemplate
+    meta["lightnow_proxy_original_uri_template"] = template.uri_template
     data["_meta"] = meta
     return ResourceTemplate.model_validate(data)
 
@@ -971,7 +977,7 @@ def first_call_tool_content_type(result: CallToolResult) -> str | None:
 def first_resource_mime_type(result: ReadResourceResult) -> str | None:
     if not result.contents:
         return None
-    return getattr(result.contents[0], "mimeType", None)
+    return getattr(result.contents[0], "mime_type", None)
 
 
 def mcp_method_for_event(event_type: str) -> str | None:

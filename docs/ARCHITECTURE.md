@@ -26,6 +26,26 @@ Resources are exposed as `lightnow://{upstream}/{encoded_original_uri}` so a
 client can read them through the proxy without leaking resource contents into
 LightNow analytics.
 
+## Protocol Compatibility
+
+The proxy prefers MCP `2026-07-28` in both directions. Modern Streamable HTTP
+requests are stateless and use `server/discover`, the required per-request
+`_meta` protocol envelope, and the `MCP-Protocol-Version`, `Mcp-Method`,
+`Mcp-Name`, and schema-derived `Mcp-Param-*` headers. Aggregated list responses
+are deterministic and carry `ttlMs: 0`, `cacheScope: private`, and
+`resultType: complete`, so clients do not reuse a profile-dependent result
+beyond the request.
+
+Connections automatically fall back to the `2025-11-25` initialization and
+session model when the peer does not implement `server/discover`. The proxy
+therefore remains usable during a mixed-version rollout without presenting
+legacy initialization or session state to a modern peer.
+
+Only tools and resources are proxied and advertised. The proxy does not claim
+roots, sampling, logging, tasks, or multi-round tool-result capabilities; an
+upstream must not initiate those flows through this boundary until an explicit
+capability-bridging design is implemented.
+
 ## Local Proxy Mode
 
 When `local_proxy.enabled` is `true`, the app exposes only the configured local

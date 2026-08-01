@@ -113,7 +113,7 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
     router = ToolRouter(config)
     server = LocalProxyMCPApp(config, router).server
 
-    def observe_initialize(session_message) -> None:
+    def observe_client_context(session_message) -> None:
         context = initialize_client_context(session_message)
         if context is not None:
             router.update_client_context(
@@ -129,7 +129,7 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
         captured_read_stream, forward_messages = await capture_read_stream(
             read_stream,
             active_capture_path,
-            observe_initialize,
+            observe_client_context,
         )
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(forward_messages)
@@ -141,7 +141,6 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
                     captured_read_stream,
                     write_stream,
                     server.create_initialization_options(),
-                    stateless=True,
                 )
             finally:
                 await router.emit_lifecycle_event("runner_stopped")

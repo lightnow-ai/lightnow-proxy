@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import timedelta
 import os
 import sys
 from typing import AsyncIterator, TextIO
 
-import httpx
-from mcp import ClientSession
+import httpx2
+from mcp import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemplate, Tool
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from lightnow_proxy.config import UpstreamConfig
 from lightnow_proxy.diagnostics import validate_upstream_config
@@ -22,7 +22,7 @@ class UpstreamMCPClient:
         self.suppress_stdio_stderr = suppress_stdio_stderr
 
     @asynccontextmanager
-    async def session(self, config: UpstreamConfig) -> AsyncIterator[ClientSession]:
+    async def session(self, config: UpstreamConfig) -> AsyncIterator[Client]:
         if config.transport == "stdio":
             async with self._stdio_session(config) as session:
                 yield session
@@ -31,27 +31,17 @@ class UpstreamMCPClient:
         if config.transport != "streamable-http" or config.url is None:
             raise ValueError(f"unsupported upstream transport: {config.transport}")
 
-        http_client = httpx.AsyncClient(
+        http_client = httpx2.AsyncClient(
             headers=config.resolved_headers(),
-            timeout=httpx.Timeout(config.timeout_seconds),
+            timeout=httpx2.Timeout(config.timeout_seconds),
         )
         async with http_client:
-            async with streamable_http_client(str(config.url), http_client=http_client) as (
-                read_stream,
-                write_stream,
-                _session_id,
-            ):
-                session = ClientSession(
-                    read_stream,
-                    write_stream,
-                    read_timeout_seconds=timedelta(seconds=config.timeout_seconds),
-                )
-                async with session:
-                    await session.initialize()
-                    yield session
+            transport = streamable_http_client(str(config.url), http_client=http_client)
+            async with Client(transport, read_timeout_seconds=config.timeout_seconds) as client:
+                yield client
 
     @asynccontextmanager
-    async def _stdio_session(self, config: UpstreamConfig) -> AsyncIterator[ClientSession]:
+    async def _stdio_session(self, config: UpstreamConfig) -> AsyncIterator[Client]:
         if not config.command:
             raise ValueError("stdio upstream requires command")
 
@@ -78,42 +68,40 @@ class UpstreamMCPClient:
         parameters: StdioServerParameters,
         config: UpstreamConfig,
         errlog: TextIO,
-    ) -> AsyncIterator[ClientSession]:
-        async with stdio_client(parameters, errlog=errlog) as (read_stream, write_stream):
-            session = ClientSession(
-                read_stream,
-                write_stream,
-                read_timeout_seconds=timedelta(seconds=config.timeout_seconds),
-            )
-            async with session:
-                await session.initialize()
-                yield session
+    ) -> AsyncIterator[Client]:
+        transport = stdio_client(parameters, errlog=errlog)
+        async with Client(transport, read_timeout_seconds=config.timeout_seconds) as client:
+            yield client
 
     async def list_tools(self, config: UpstreamConfig) -> list[Tool]:
-        async with self.session(config) as session:
-            result = await session.list_tools()
+        async with self.session(config) as client:
+            result = await client.list_tools()
             return list(result.tools)
 
     async def call_tool(self, config: UpstreamConfig, tool_name: str, arguments: dict | None) -> CallToolResult:
-        async with self.session(config) as session:
-            result = await session.call_tool(tool_name, arguments=arguments or {})
+        async with self.session(config) as client:
+            if config.transport == "streamable-http" and client.protocol_version in MODERN_PROTOCOL_VERSIONS:
+                # Modern HTTP clients derive required Mcp-Param-* headers from
+                # the most recent tools/list schema on the same connection.
+                await client.list_tools(cache_mode="bypass")
+            result = await client.call_tool(tool_name, arguments=arguments or {})
             if isinstance(result, CallToolResult):
                 return result
             return CallToolResult.model_validate(result)
 
     async def list_resources(self, config: UpstreamConfig) -> list[Resource]:
-        async with self.session(config) as session:
-            result = await session.list_resources()
+        async with self.session(config) as client:
+            result = await client.list_resources()
             return list(result.resources)
 
     async def list_resource_templates(self, config: UpstreamConfig) -> list[ResourceTemplate]:
-        async with self.session(config) as session:
-            result = await session.list_resource_templates()
-            return list(result.resourceTemplates)
+        async with self.session(config) as client:
+            result = await client.list_resource_templates()
+            return list(result.resource_templates)
 
     async def read_resource(self, config: UpstreamConfig, uri: str) -> ReadResourceResult:
-        async with self.session(config) as session:
-            result = await session.read_resource(uri)
+        async with self.session(config) as client:
+            result = await client.read_resource(uri)
             if isinstance(result, ReadResourceResult):
                 return result
             return ReadResourceResult.model_validate(result)

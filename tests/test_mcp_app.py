@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import timedelta
 import socket
 import sys
 from typing import Any, AsyncIterator
 from unittest.mock import patch
 
 import httpx
-from mcp import ClientSession
-from mcp.server import Server
+import httpx2
+from mcp import Client
+from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.client.streamable_http import streamable_http_client
 from mcp import types
@@ -613,24 +613,50 @@ async def test_mcp_profile_lists_and_calls_prefixed_tools() -> None:
     from lightnow_proxy.router import ToolRouter
 
     app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx2.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
+        async with httpx2.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
             http_client.headers["Authorization"] = "Bearer admin-token"
-            async with streamable_http_client(
+            mcp_transport = streamable_http_client(
                 "http://localhost:8080/profiles/admins/mcp",
                 http_client=http_client,
-            ) as (read_stream, write_stream, _session_id):
-                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
-                async with session:
-                    await session.initialize()
-                    tools = await session.list_tools()
-                    names = {tool.name for tool in tools.tools}
-                    assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
+            )
+            async with Client(mcp_transport, read_timeout_seconds=5) as client:
+                tools = await client.list_tools()
+                assert client.protocol_version == "2026-07-28"
+                assert tools.ttl_ms == 0
+                assert tools.cache_scope == "private"
+                assert tools.result_type == "complete"
+                names = {tool.name for tool in tools.tools}
+                assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
 
-                    result = await session.call_tool("grafana__query_loki_logs", arguments={"logql": '{job="x"}'})
-                    assert result.isError is False
-                    assert "grafana.example.test:query_loki_logs" in result.content[0].text
+                result = await client.call_tool("grafana__query_loki_logs", arguments={"logql": '{job="x"}'})
+                assert result.is_error is False
+                assert "grafana.example.test:query_loki_logs" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_keeps_legacy_2025_clients_working() -> None:
+    config = build_config()
+    from lightnow_proxy.router import ToolRouter
+
+    app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
+    transport = httpx2.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
+            http_client.headers["Authorization"] = "Bearer admin-token"
+            mcp_transport = streamable_http_client(
+                "http://localhost:8080/profiles/admins/mcp",
+                http_client=http_client,
+            )
+            async with Client(mcp_transport, mode="legacy", read_timeout_seconds=5) as client:
+                protocol_version = client.protocol_version
+                tools = await client.list_tools()
+                result = await client.call_tool("nextcloud__search_files", arguments={"query": "m2"})
+
+    assert protocol_version == "2025-11-25"
+    assert {tool.name for tool in tools.tools} == {"grafana__query_loki_logs", "nextcloud__search_files"}
+    assert result.is_error is False
 
 
 @pytest.mark.asyncio
@@ -666,19 +692,17 @@ async def test_mcp_profile_resolves_runtime_upstreams_with_principal() -> None:
     registry_client = FakeRegistryClient()
     router.registry_client = registry_client
     app = create_app(config, router=router)
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx2.ASGITransport(app=app)
 
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
+        async with httpx2.AsyncClient(transport=transport, base_url="http://localhost:8080") as http_client:
             http_client.headers["Authorization"] = "Bearer admin-token"
-            async with streamable_http_client(
+            mcp_transport = streamable_http_client(
                 "http://localhost:8080/profiles/admins/mcp",
                 http_client=http_client,
-            ) as (read_stream, write_stream, _session_id):
-                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
-                async with session:
-                    await session.initialize()
-                    tools = await session.list_tools()
+            )
+            async with Client(mcp_transport, read_timeout_seconds=5) as client:
+                tools = await client.list_tools()
 
     assert {tool.name for tool in tools.tools} == {"grafana__query_loki_logs"}
     assert registry_client.principals[0] is not None
@@ -694,23 +718,92 @@ async def test_local_proxy_endpoint_lists_and_calls_selected_profile_tools() -> 
     from lightnow_proxy.router import ToolRouter
 
     app = create_app(config, router=ToolRouter(config, upstream_client=FakeUpstreamClient()))
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx2.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
-            async with streamable_http_client(
+        async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
+            mcp_transport = streamable_http_client(
                 "http://127.0.0.1:8080/mcp",
                 http_client=http_client,
-            ) as (read_stream, write_stream, _session_id):
-                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
-                async with session:
-                    await session.initialize()
-                    tools = await session.list_tools()
-                    names = {tool.name for tool in tools.tools}
-                    assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
+            )
+            async with Client(mcp_transport, read_timeout_seconds=5) as client:
+                tools = await client.list_tools()
+                names = {tool.name for tool in tools.tools}
+                assert names == {"grafana__query_loki_logs", "nextcloud__search_files"}
 
-                    result = await session.call_tool("nextcloud__search_files", arguments={"query": "m2"})
-                    assert result.isError is False
-                    assert "nextcloud.example.test:search_files" in result.content[0].text
+                result = await client.call_tool("nextcloud__search_files", arguments={"query": "m2"})
+                assert result.is_error is False
+                assert "nextcloud.example.test:search_files" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_modern_requests_keep_client_identity_isolated_per_request() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+
+    from lightnow_proxy.router import ToolRouter
+
+    router = ToolRouter(config, upstream_client=FakeUpstreamClient())
+    registry = FakeRuntimeEventRegistry()
+    router.registry_client = registry
+    app = create_app(config, router=router)
+    transport = httpx2.ASGITransport(app=app)
+
+    async def call_as(client_name: str) -> None:
+        async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
+            mcp_transport = streamable_http_client(
+                "http://127.0.0.1:8080/mcp",
+                http_client=http_client,
+            )
+            async with Client(
+                mcp_transport,
+                client_info=types.Implementation(name=client_name, version="1.0.0"),
+                read_timeout_seconds=5,
+            ) as client:
+                await client.call_tool("nextcloud__search_files", arguments={"query": client_name})
+
+    async with app.router.lifespan_context(app):
+        await asyncio.gather(call_as("codex-a"), call_as("codex-b"))
+
+    call_events = [event for event in registry.events if event["event_type"] == "call_tool"]
+    assert {event["mcp_client_name"] for event in call_events} == {"codex-a", "codex-b"}
+    assert {event["mcp_client_version"] for event in call_events} == {"1.0.0"}
+
+
+@pytest.mark.asyncio
+async def test_modern_discovery_is_stateless() -> None:
+    config = build_config()
+    config.local_proxy.enabled = True
+    config.local_proxy.profile = "admins"
+    app = create_app(config)
+    transport = httpx2.ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as client:
+            response = await client.post(
+                "/mcp",
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "MCP-Protocol-Version": "2026-07-28",
+                    "Mcp-Method": "server/discover",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover",
+                    "params": {
+                        "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                            "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1.0.0"},
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                        }
+                    },
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.headers.get("mcp-session-id") is None
+    assert "2026-07-28" in response.text
 
 
 @pytest.mark.asyncio
@@ -853,23 +946,23 @@ async def test_local_proxy_call_tool_does_not_force_tool_listing() -> None:
             assert profile_name == "admins"
             assert name == "jenkins__getStatus"
             assert arguments == {}
-            assert request_meta is None
+            assert request_meta is not None
+            assert request_meta["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+            assert request_meta["io.modelcontextprotocol/clientInfo"]["name"] == "mcp"
             return CallToolResult(content=[TextContent(type="text", text="ok")])
 
     app = create_app(config, router=CallOnlyRouter())
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx2.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
-            async with streamable_http_client(
+        async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
+            mcp_transport = streamable_http_client(
                 "http://127.0.0.1:8080/mcp",
                 http_client=http_client,
-            ) as (read_stream, write_stream, _session_id):
-                session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
-                async with session:
-                    await session.initialize()
-                    result = await session.call_tool("jenkins__getStatus", arguments={})
+            )
+            async with Client(mcp_transport, read_timeout_seconds=5) as client:
+                result = await client.call_tool("jenkins__getStatus", arguments={})
 
-    assert result.isError is False
+    assert result.is_error is False
     assert result.content[0].text == "ok"
     assert calls == ["call_tool", "list_tools"]
 
@@ -886,28 +979,26 @@ async def test_unvalidated_call_tool_handler_forwards_request_meta() -> None:
         return CallToolResult(content=[TextContent(type="text", text="ok")])
 
     register_unvalidated_call_tool_handler(server, handler)
-    request = types.CallToolRequest.model_validate(
+    params = types.CallToolRequestParams.model_validate(
         {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "jenkins__getStatus",
-                "arguments": {"jobFullName": "lightnow-ai/registry-api/master"},
-                "_meta": {
-                    "threadId": "thread-1",
-                    "x-codex-turn-metadata": {
-                        "model": "gpt-5.5",
-                        "turn_id": "turn-1",
-                    },
+            "name": "jenkins__getStatus",
+            "arguments": {"jobFullName": "lightnow-ai/registry-api/master"},
+            "_meta": {
+                "threadId": "thread-1",
+                "x-codex-turn-metadata": {
+                    "model": "gpt-5.5",
+                    "turn_id": "turn-1",
                 },
             },
-        }
+        },
+        by_name=False,
     )
 
-    result = await server.request_handlers[types.CallToolRequest](request)
+    entry = server.get_request_handler("tools/call")
+    assert entry is not None
+    result = await entry.handler(None, params)
 
-    assert result.root.content[0].text == "ok"
+    assert result.content[0].text == "ok"
     assert captured == {
         "name": "jenkins__getStatus",
         "arguments": {"jobFullName": "lightnow-ai/registry-api/master"},
@@ -926,9 +1017,9 @@ async def test_stdio_upstream_lists_and_calls_tools(tmp_path) -> None:
     server = tmp_path / "echo_server.py"
     server.write_text(
         """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("echo")
+mcp = MCPServer("echo")
 
 @mcp.tool()
 def echo(value: str) -> str:
@@ -951,8 +1042,82 @@ if __name__ == "__main__":
     assert [tool.name for tool in tools] == ["echo"]
 
     result = await client.call_tool(upstream, "echo", {"value": "ok"})
-    assert result.isError is False
+    assert result.is_error is False
     assert result.content[0].text == "echo:ok"
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_falls_back_to_legacy_initialize(tmp_path) -> None:
+    server = tmp_path / "legacy_echo_server.py"
+    server.write_text(
+        """
+import json
+import sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "server/discover":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+    elif method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "legacy-echo", "version": "0.1.0"},
+            },
+        }
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo a value",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                }]
+            },
+        }
+    elif method == "tools/call":
+        value = message.get("params", {}).get("arguments", {}).get("value", "")
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"content": [{"type": "text", "text": f"legacy:{value}"}], "isError": False},
+        }
+    else:
+        continue
+    sys.stdout.write(json.dumps(response) + "\\n")
+    sys.stdout.flush()
+""".lstrip(),
+        encoding="utf-8",
+    )
+    upstream = UpstreamConfig(
+        transport="stdio",
+        command=sys.executable,
+        args=[str(server)],
+        timeout_seconds=5,
+    )
+
+    client = UpstreamMCPClient()
+    tools = await client.list_tools(upstream)
+    result = await client.call_tool(upstream, "echo", {"value": "ok"})
+
+    assert [tool.name for tool in tools] == ["echo"]
+    assert result.is_error is False
+    assert result.content[0].text == "legacy:ok"
 
 
 @pytest.mark.asyncio
@@ -960,9 +1125,9 @@ async def test_local_proxy_routes_to_stdio_and_streamable_http_upstreams(tmp_pat
     stdio_server = tmp_path / "echo_server.py"
     stdio_server.write_text(
         """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("echo")
+mcp = MCPServer("echo")
 
 @mcp.tool()
 def echo(value: str) -> str:
@@ -987,30 +1152,31 @@ if __name__ == "__main__":
         )
 
         local_app = create_app(config)
-        transport = httpx.ASGITransport(app=local_app)
+        transport = httpx2.ASGITransport(app=local_app)
 
         async with local_app.router.lifespan_context(local_app):
-            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
+            async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as http_client:
                 profile_response = await http_client.get("/profiles/default/mcp")
                 assert profile_response.status_code == 404
 
-                async with streamable_http_client(
+                mcp_transport = streamable_http_client(
                     "http://127.0.0.1:8080/mcp",
                     http_client=http_client,
-                ) as (read_stream, write_stream, _session_id):
-                    session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=10))
-                    async with session:
-                        await session.initialize()
-                        tools = await session.list_tools()
-                        assert {tool.name for tool in tools.tools} == {"echo__echo", "math__add"}
+                )
+                async with Client(mcp_transport, read_timeout_seconds=10) as client:
+                    tools = await client.list_tools()
+                    assert {tool.name for tool in tools.tools} == {"echo__echo", "math__add"}
 
-                        echo = await session.call_tool("echo__echo", arguments={"value": "ok"})
-                        assert echo.isError is False
-                        assert echo.content[0].text == "echo:ok"
+                    echo = await client.call_tool("echo__echo", arguments={"value": "ok"})
+                    assert echo.is_error is False
+                    assert echo.content[0].text == "echo:ok"
 
-                        add = await session.call_tool("math__add", arguments={"left": 2, "right": 3})
-                        assert add.isError is False
-                        assert add.content[0].text == "5"
+                    add = await client.call_tool(
+                        "math__add",
+                        arguments={"left": 2, "right": 3, "region": "eu"},
+                    )
+                    assert add.is_error is False
+                    assert add.content[0].text == "5"
 
 
 @asynccontextmanager
@@ -1063,32 +1229,42 @@ class MathUpstreamApp:
 
 
 def build_math_upstream_server() -> Server:
-    server = Server("math-upstream", version="0.1.0")
+    async def list_tools(_ctx, _params) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                Tool(
+                    name="add",
+                    description="Add two integers",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "left": {"type": "integer"},
+                            "right": {"type": "integer"},
+                            "region": {"type": "string", "x-mcp-header": "Region"},
+                        },
+                        "required": ["left", "right"],
+                    },
+                )
+            ]
+        )
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return [
-            Tool(
-                name="add",
-                description="Add two integers",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"left": {"type": "integer"}, "right": {"type": "integer"}},
-                    "required": ["left", "right"],
-                },
+    async def call_tool(_ctx, params: types.CallToolRequestParams) -> CallToolResult:
+        if params.name != "add":
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"unknown tool: {params.name}")],
+                is_error=True,
             )
-        ]
-
-    @server.call_tool(validate_input=False)
-    async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
-        if name != "add":
-            return CallToolResult(content=[TextContent(type="text", text=f"unknown tool: {name}")], isError=True)
-        payload = arguments or {}
+        payload = params.arguments or {}
         return CallToolResult(
             content=[TextContent(type="text", text=str(int(payload["left"]) + int(payload["right"])))]
         )
 
-    return server
+    return Server(
+        "math-upstream",
+        version="0.1.0",
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
 
 
 def build_config() -> ProxyConfig:
