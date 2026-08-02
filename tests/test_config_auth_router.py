@@ -233,7 +233,7 @@ async def test_router_rejects_tool_outside_profile() -> None:
     )
     router = ToolRouter(config)
     result = await router.call_tool("users", "grafana__query_loki_logs", {})
-    assert result.isError is True
+    assert result.is_error is True
     assert isinstance(result.content[0], TextContent)
     assert "not available" in result.content[0].text
 
@@ -519,7 +519,7 @@ async def test_router_resolves_only_target_lightnow_upstream_for_tool_calls() ->
 
     result = await router.call_tool("default", "jenkins__getStatus", {})
 
-    assert result.isError is not True
+    assert result.is_error is not True
     assert registry_client.fetch_all_called is False
     assert registry_client.events[0]["server_alias"] == "jenkins"
     assert registry_client.events[0]["server_name"] == "custom:jenkins"
@@ -580,7 +580,7 @@ async def test_router_emits_call_tool_event_with_arguments_by_default() -> None:
         },
     )
 
-    assert result.isError is not True
+    assert result.is_error is not True
     event = registry_client.events[0]
     assert event["profile"] == "default"
     assert event["event_type"] == "call_tool"
@@ -637,7 +637,7 @@ async def test_router_can_disable_tool_argument_capture_without_disabling_teleme
         async def call_tool(
             self, config: UpstreamConfig, tool_name: str, arguments: dict[str, object]
         ) -> CallToolResult:
-            return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
+            return CallToolResult(content=[TextContent(type="text", text="ok")], is_error=False)
 
     config = ProxyConfig(
         server=ServerConfig(),
@@ -682,7 +682,7 @@ async def test_router_maps_antigravity_conversation_to_generic_client_context() 
         async def call_tool(
             self, config: UpstreamConfig, tool_name: str, arguments: dict[str, object]
         ) -> CallToolResult:
-            return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
+            return CallToolResult(content=[TextContent(type="text", text="ok")], is_error=False)
 
     config = ProxyConfig(
         server=ServerConfig(),

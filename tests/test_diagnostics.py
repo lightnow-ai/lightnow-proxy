@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import httpx2
 import pytest
 
 from lightnow_proxy.config import UpstreamConfig
-from lightnow_proxy.diagnostics import UpstreamConfigurationError, validate_upstream_config
+from lightnow_proxy.diagnostics import (
+    UpstreamConfigurationError,
+    diagnostic_for_exception,
+    validate_upstream_config,
+)
+
+
+def test_classifies_httpx2_authentication_failure() -> None:
+    request = httpx2.Request("POST", "https://example.test/mcp")
+    response = httpx2.Response(401, request=request)
+
+    diagnostic = diagnostic_for_exception(
+        httpx2.HTTPStatusError("unauthorized", request=request, response=response)
+    )
+
+    assert diagnostic.code == "UPSTREAM_AUTHENTICATION_FAILED"
+    assert diagnostic.kind == "authentication"
 
 
 @pytest.mark.parametrize("tty_argument", ["-t", "-it", "-ti", "--tty", "--tty=true"])

@@ -73,7 +73,7 @@ async def write_capture(capture_path: str, block: str | None) -> None:
 
 
 def describe_session_message(session_message: SessionMessage) -> str | None:
-    message = session_message.message.root
+    message = session_message.message
     if isinstance(message, types.JSONRPCRequest):
         return describe_request(message)
     if isinstance(message, types.JSONRPCNotification):
@@ -82,17 +82,24 @@ def describe_session_message(session_message: SessionMessage) -> str | None:
 
 
 def initialize_client_context(session_message: SessionMessage) -> dict[str, Any] | None:
-    message = session_message.message.root
+    """Extract client identity from either legacy initialize or modern request metadata."""
+    message = session_message.message
     if not isinstance(message, types.JSONRPCRequest):
         return None
 
     payload = message.model_dump(mode="json", by_alias=True, exclude_none=True)
-    if payload.get("method") != "initialize":
-        return None
-
     params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-    client_info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
-    capabilities = params.get("capabilities") if isinstance(params.get("capabilities"), dict) else {}
+    if payload.get("method") == "initialize":
+        client_info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+        capabilities = params.get("capabilities") if isinstance(params.get("capabilities"), dict) else {}
+    else:
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        raw_client_info = meta.get("io.modelcontextprotocol/clientInfo")
+        raw_capabilities = meta.get("io.modelcontextprotocol/clientCapabilities")
+        client_info = raw_client_info if isinstance(raw_client_info, dict) else {}
+        capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
+        if not client_info and not capabilities:
+            return None
     return {
         "name": client_info.get("name") if isinstance(client_info.get("name"), str) else None,
         "version": client_info.get("version") if isinstance(client_info.get("version"), str) else None,

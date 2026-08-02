@@ -12,6 +12,9 @@ It runs on your machine, uses your LightNow CLI login session, resolves the MCP
 servers enabled for your selected LightNow profile, and forwards tool/resource
 requests to local `stdio` or reachable Streamable HTTP MCP servers.
 
+The proxy supports the official MCP `2026-07-28` revision and keeps automatic
+compatibility with handshake-era servers and clients through `2025-11-25`.
+
 ## Install
 
 Requirements:

@@ -21,8 +21,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-  "mcp[cli]>=1.28,<2",
+  "mcp[cli]>=2,<3",
   "httpx>=0.28.1",
+  "httpx2>=2.5.0",
   "filelock>=3.16.1",
   "pydantic>=2.8.2",
   "pydantic-settings>=2.6.1",

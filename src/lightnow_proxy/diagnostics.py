@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
+import httpx2
 
 from lightnow_proxy.config import UpstreamConfig
 
@@ -91,7 +92,7 @@ def diagnostic_for_exception(exc: BaseException) -> RuntimeDiagnostic:
             remediation="Install the command on this device or update the Runtime Profile to use an available executable.",
         )
 
-    if isinstance(exc, TimeoutError | httpx.TimeoutException):
+    if isinstance(exc, TimeoutError | httpx.TimeoutException | httpx2.TimeoutException):
         return RuntimeDiagnostic(
             code="UPSTREAM_TIMEOUT",
             kind="timeout",
@@ -99,7 +100,7 @@ def diagnostic_for_exception(exc: BaseException) -> RuntimeDiagnostic:
             remediation="Check that the server is reachable and increase the configured timeout only if startup is expected to be slow.",
         )
 
-    if isinstance(exc, httpx.HTTPStatusError):
+    if isinstance(exc, httpx.HTTPStatusError | httpx2.HTTPStatusError):
         status = exc.response.status_code
         if status == 401:
             return RuntimeDiagnostic(

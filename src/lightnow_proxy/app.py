@@ -8,7 +8,7 @@ import logging
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp import types
@@ -25,7 +25,7 @@ from lightnow_proxy import __version__
 from lightnow_proxy.auth import AuthError, TokenVerifier, has_required_group
 from lightnow_proxy.config import ProxyConfig
 from lightnow_proxy.health import build_health_report
-from lightnow_proxy.request_context import current_principal
+from lightnow_proxy.request_context import current_mcp_client_context, current_principal
 from lightnow_proxy.router import ToolRouter, ToolRoutingError
 
 logger = structlog.get_logger("lightnow_proxy")
@@ -52,36 +52,46 @@ class ProfileMCPApp:
         )
 
     def _build_server(self) -> Server:
-        server = Server(f"lightnow-proxy-{self.profile_name}", version=__version__)
+        async def list_tools(_ctx, _params) -> types.ListToolsResult:
+            tools = await self.router.list_tools(self.profile_name)
+            return types.ListToolsResult(tools=tools, ttl_ms=0, cache_scope="private")
 
-        @server.list_tools()
-        async def list_tools() -> list:
-            return await self.router.list_tools(self.profile_name)
-
-        @server.call_tool(validate_input=False)
-        async def call_tool(
-            name: str,
-            arguments: dict[str, Any] | None = None,
-            request_meta: dict[str, Any] | None = None,
-        ) -> CallToolResult:
+        async def call_tool(_ctx, params: types.CallToolRequestParams) -> CallToolResult:
             try:
-                return await self.router.call_tool(self.profile_name, name, arguments or {}, request_meta)
+                return await self.router.call_tool(
+                    self.profile_name,
+                    params.name,
+                    params.arguments or {},
+                    request_meta=request_meta_dict(params.meta),
+                )
             except ToolRoutingError as exc:
-                return CallToolResult(content=[TextContent(type="text", text=str(exc))], isError=True)
+                return CallToolResult(content=[TextContent(type="text", text=str(exc))], is_error=True)
 
-        @server.list_resources()
-        async def list_resources() -> list:
-            return await self.router.list_resources(self.profile_name)
+        async def list_resources(_ctx, _params) -> types.ListResourcesResult:
+            resources = await self.router.list_resources(self.profile_name)
+            return types.ListResourcesResult(resources=resources, ttl_ms=0, cache_scope="private")
 
-        @server.list_resource_templates()
-        async def list_resource_templates() -> list:
-            return await self.router.list_resource_templates(self.profile_name)
+        async def list_resource_templates(_ctx, _params) -> types.ListResourceTemplatesResult:
+            templates = await self.router.list_resource_templates(self.profile_name)
+            return types.ListResourceTemplatesResult(
+                resource_templates=templates,
+                ttl_ms=0,
+                cache_scope="private",
+            )
 
-        @server.read_resource()
-        async def read_resource(uri: str) -> ReadResourceResult:
-            return await self.router.read_resource(self.profile_name, uri)
+        async def read_resource(_ctx, params: types.ReadResourceRequestParams) -> ReadResourceResult:
+            return await self.router.read_resource(self.profile_name, str(params.uri))
 
-        register_unvalidated_call_tool_handler(server, call_tool)
+        server = Server(
+            f"lightnow-proxy-{self.profile_name}",
+            version=__version__,
+            on_list_tools=list_tools,
+            on_call_tool=call_tool,
+            on_list_resources=list_resources,
+            on_list_resource_templates=list_resource_templates,
+            on_read_resource=read_resource,
+        )
+        server.middleware.append(bind_request_client_context)
         return server
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -134,36 +144,46 @@ class LocalProxyMCPApp:
         )
 
     def _build_server(self) -> Server:
-        server = Server("lightnow-local-proxy", version=__version__)
+        async def list_tools(_ctx, _params) -> types.ListToolsResult:
+            tools = await self.router.list_tools(self.profile_name)
+            return types.ListToolsResult(tools=tools, ttl_ms=0, cache_scope="private")
 
-        @server.list_tools()
-        async def list_tools() -> list:
-            return await self.router.list_tools(self.profile_name)
-
-        @server.call_tool(validate_input=False)
-        async def call_tool(
-            name: str,
-            arguments: dict[str, Any] | None = None,
-            request_meta: dict[str, Any] | None = None,
-        ) -> CallToolResult:
+        async def call_tool(_ctx, params: types.CallToolRequestParams) -> CallToolResult:
             try:
-                return await self.router.call_tool(self.profile_name, name, arguments or {}, request_meta)
+                return await self.router.call_tool(
+                    self.profile_name,
+                    params.name,
+                    params.arguments or {},
+                    request_meta=request_meta_dict(params.meta),
+                )
             except ToolRoutingError as exc:
-                return CallToolResult(content=[TextContent(type="text", text=str(exc))], isError=True)
+                return CallToolResult(content=[TextContent(type="text", text=str(exc))], is_error=True)
 
-        @server.list_resources()
-        async def list_resources() -> list:
-            return await self.router.list_resources(self.profile_name)
+        async def list_resources(_ctx, _params) -> types.ListResourcesResult:
+            resources = await self.router.list_resources(self.profile_name)
+            return types.ListResourcesResult(resources=resources, ttl_ms=0, cache_scope="private")
 
-        @server.list_resource_templates()
-        async def list_resource_templates() -> list:
-            return await self.router.list_resource_templates(self.profile_name)
+        async def list_resource_templates(_ctx, _params) -> types.ListResourceTemplatesResult:
+            templates = await self.router.list_resource_templates(self.profile_name)
+            return types.ListResourceTemplatesResult(
+                resource_templates=templates,
+                ttl_ms=0,
+                cache_scope="private",
+            )
 
-        @server.read_resource()
-        async def read_resource(uri: str) -> ReadResourceResult:
-            return await self.router.read_resource(self.profile_name, uri)
+        async def read_resource(_ctx, params: types.ReadResourceRequestParams) -> ReadResourceResult:
+            return await self.router.read_resource(self.profile_name, str(params.uri))
 
-        register_unvalidated_call_tool_handler(server, call_tool)
+        server = Server(
+            "lightnow-local-proxy",
+            version=__version__,
+            on_list_tools=list_tools,
+            on_call_tool=call_tool,
+            on_list_resources=list_resources,
+            on_list_resource_templates=list_resource_templates,
+            on_read_resource=read_resource,
+        )
+        server.middleware.append(bind_request_client_context)
         return server
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -381,12 +401,38 @@ def device_heartbeat_status(router: Any) -> dict[str, Any]:
     }
 
 
-def register_unvalidated_call_tool_handler(server: Server, handler_func) -> None:
-    async def handler(req: types.CallToolRequest):
-        request_meta = (
-            req.params.meta.model_dump(mode="json", by_alias=True, exclude_none=True) if req.params.meta else None
-        )
-        result = await handler_func(req.params.name, req.params.arguments or {}, request_meta)
-        return types.ServerResult(result)
+def request_meta_dict(meta: types.RequestParamsMeta | None) -> dict[str, Any] | None:
+    return dict(meta) if meta is not None else None
 
-    server.request_handlers[types.CallToolRequest] = handler
+
+async def bind_request_client_context(ctx, call_next):
+    token = current_mcp_client_context.set(server_client_context(ctx))
+    try:
+        return await call_next(ctx)
+    finally:
+        current_mcp_client_context.reset(token)
+
+
+def server_client_context(ctx) -> dict[str, Any]:
+    client_params = ctx.session.client_params
+    client_info = client_params.client_info if client_params is not None else None
+    capabilities = ctx.session.client_capabilities
+    return {
+        "name": client_info.name if client_info is not None else None,
+        "version": client_info.version if client_info is not None else None,
+        "capability_keys": sorted(capabilities.model_fields_set) if capabilities is not None else [],
+        "protocol_version": ctx.protocol_version,
+    }
+
+
+def register_unvalidated_call_tool_handler(server: Server, handler_func) -> None:
+    """Register a raw tools/call handler without high-level schema validation."""
+
+    async def handler(_ctx, params: types.CallToolRequestParams):
+        return await handler_func(
+            params.name,
+            params.arguments or {},
+            request_meta_dict(params.meta),
+        )
+
+    server.add_request_handler("tools/call", types.CallToolRequestParams, handler)

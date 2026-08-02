@@ -7,7 +7,7 @@ from lightnow_proxy.capture import describe_session_message, initialize_client_c
 
 
 def test_capture_describes_initialize_client_info() -> None:
-    message = types.JSONRPCMessage.model_validate(
+    message = types.jsonrpc_message_adapter.validate_python(
         {
             "jsonrpc": "2.0",
             "id": 1,
@@ -17,7 +17,8 @@ def test_capture_describes_initialize_client_info() -> None:
                 "clientInfo": {"name": "codex", "version": "0.42.0"},
                 "capabilities": {"roots": {}, "sampling": {}},
             },
-        }
+        },
+        by_name=False,
     )
 
     captured = describe_session_message(SessionMessage(message))
@@ -31,7 +32,7 @@ def test_capture_describes_initialize_client_info() -> None:
 
 
 def test_capture_extracts_initialize_client_context() -> None:
-    message = types.JSONRPCMessage.model_validate(
+    message = types.jsonrpc_message_adapter.validate_python(
         {
             "jsonrpc": "2.0",
             "id": 1,
@@ -41,7 +42,8 @@ def test_capture_extracts_initialize_client_context() -> None:
                 "clientInfo": {"name": "claude-desktop", "version": "0.12.3"},
                 "capabilities": {"roots": {}, "sampling": {}},
             },
-        }
+        },
+        by_name=False,
     )
 
     context = initialize_client_context(SessionMessage(message))
@@ -53,8 +55,37 @@ def test_capture_extracts_initialize_client_context() -> None:
     }
 
 
+def test_capture_extracts_modern_per_request_client_context() -> None:
+    message = types.jsonrpc_message_adapter.validate_python(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/clientInfo": {"name": "codex", "version": "1.2.3"},
+                    "io.modelcontextprotocol/clientCapabilities": {
+                        "elicitation": {},
+                        "sampling": {},
+                    },
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                }
+            },
+        },
+        by_name=False,
+    )
+
+    context = initialize_client_context(SessionMessage(message))
+
+    assert context == {
+        "name": "codex",
+        "version": "1.2.3",
+        "capability_keys": ["elicitation", "sampling"],
+    }
+
+
 def test_capture_describes_tool_call_without_leaking_secrets() -> None:
-    message = types.JSONRPCMessage.model_validate(
+    message = types.jsonrpc_message_adapter.validate_python(
         {
             "jsonrpc": "2.0",
             "id": 2,
@@ -67,7 +98,8 @@ def test_capture_describes_tool_call_without_leaking_secrets() -> None:
                 },
                 "_meta": {"requestId": "req-1"},
             },
-        }
+        },
+        by_name=False,
     )
 
     captured = describe_session_message(SessionMessage(message))
