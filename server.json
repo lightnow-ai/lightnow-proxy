@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "identifier": "lightnow-proxy",
       "version": "1.7.0",
-      "runtimeHint": "python",
+      "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
       },
