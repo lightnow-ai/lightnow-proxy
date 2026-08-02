@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.6.0...v1.7.0) (2026-08-02)
+
+
+### Features
+
+* **protocol:** support MCP 2026 dual-era routing ([#23](https://github.com/lightnow-ai/lightnow-proxy/issues/23)) ([08cd527](https://github.com/lightnow-ai/lightnow-proxy/commit/08cd52713feca4a2d6251aefb8cbbeebd3cd5103))
+
+
+### Bug Fixes
+
+* **deps:** cap MCP SDK before v2 migration ([#22](https://github.com/lightnow-ai/lightnow-proxy/issues/22)) ([729590c](https://github.com/lightnow-ai/lightnow-proxy/commit/729590ce43876533f33dfdb3ed3e7b5dca34c7e4))
+
 ## [1.6.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.5.0...v1.6.0) (2026-07-18)
 
 
