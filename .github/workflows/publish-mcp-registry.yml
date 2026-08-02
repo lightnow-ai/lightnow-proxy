@@ -1,0 +1,155 @@
+name: Publish to MCP Registry
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      # Bootstrap the already released manifest when this workflow first lands.
+      # GitHub does not evaluate path filters for tag pushes, so future version
+      # tags still publish the exact tagged server.json.
+      - .github/workflows/publish-mcp-registry.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-registry-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish server metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MCP_PUBLISHER_VERSION: "1.8.0"
+      MCP_REGISTRY_URL: https://registry.modelcontextprotocol.io
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Verify release inputs
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          server_name="$(jq -er '.name' server.json)"
+          manifest_version="$(jq -er '.version' server.json)"
+          package_version="$(jq -er '
+            .packages[]
+            | select(.registryType == "pypi" and .identifier == "lightnow-proxy")
+            | .version
+          ' server.json)"
+
+          if [[ "$manifest_version" != "$package_version" ]]; then
+            echo "server.json and PyPI package versions differ" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "$manifest_version" != "$tag_version" ]]; then
+              echo "server.json version $manifest_version does not match tag $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+          fi
+
+          curl --fail --silent --show-error \
+            "https://pypi.org/pypi/lightnow-proxy/${manifest_version}/json" \
+            >/dev/null
+
+          echo "server_name=$server_name" >>"$GITHUB_OUTPUT"
+          echo "version=$manifest_version" >>"$GITHUB_OUTPUT"
+
+      - name: Check existing Registry version
+        id: registry
+        shell: bash
+        env:
+          SERVER_NAME: ${{ steps.manifest.outputs.server_name }}
+          SERVER_VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          response="$(curl --fail --silent --show-error --get \
+            --data-urlencode "search=$SERVER_NAME" \
+            --data-urlencode "limit=100" \
+            "$MCP_REGISTRY_URL/v0.1/servers")"
+
+          if jq -e \
+            --arg name "$SERVER_NAME" \
+            --arg version "$SERVER_VERSION" \
+            '.servers[]? | select(.server.name == $name and .server.version == $version)' \
+            <<<"$response" >/dev/null; then
+            echo "published=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "published=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Install mcp-publisher
+        if: steps.registry.outputs.published != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/${archive}" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Validate server metadata
+        if: steps.registry.outputs.published != 'true'
+        run: ./mcp-publisher validate server.json
+
+      - name: Authenticate with GitHub OIDC
+        if: steps.registry.outputs.published != 'true'
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server metadata
+        if: steps.registry.outputs.published != 'true'
+        run: ./mcp-publisher publish server.json
+
+      - name: Verify published Registry version
+        shell: bash
+        env:
+          SERVER_NAME: ${{ steps.manifest.outputs.server_name }}
+          SERVER_VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..12}; do
+            response="$(curl --fail --silent --show-error --get \
+              --data-urlencode "search=$SERVER_NAME" \
+              --data-urlencode "limit=100" \
+              "$MCP_REGISTRY_URL/v0.1/servers")"
+
+            if jq -e \
+              --arg name "$SERVER_NAME" \
+              --arg version "$SERVER_VERSION" \
+              '.servers[]?.server
+               | select(.name == $name and .version == $version)
+               | .packages[]?
+               | select(
+                   .registryType == "pypi"
+                   and .identifier == "lightnow-proxy"
+                   and .version == $version
+                   and .runtimeHint == "uvx"
+                 )' \
+              <<<"$response" >/dev/null; then
+              exit 0
+            fi
+
+            echo "Registry version is not visible yet (${attempt}/12)."
+            sleep 5
+          done
+
+          echo "Published Registry version did not become visible with the expected uvx package" >&2
+          exit 1
