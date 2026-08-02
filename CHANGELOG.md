@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.7.0...v1.7.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* **registry:** advertise uvx package runtime ([#28](https://github.com/lightnow-ai/lightnow-proxy/issues/28)) ([f522891](https://github.com/lightnow-ai/lightnow-proxy/commit/f522891431af3eeac96066f9368a5b40fbdd3e73))
+
 ## [1.7.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.6.0...v1.7.0) (2026-08-02)
 
 
