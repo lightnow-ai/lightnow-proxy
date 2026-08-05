@@ -25,13 +25,13 @@
     "id": "1291018077"
   },
   "websiteUrl": "https://docs.lightnow.ai/getting-started/sync-mcp-clients/",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "lightnow-proxy",
-      "version": "1.7.1",
+      "version": "1.8.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
