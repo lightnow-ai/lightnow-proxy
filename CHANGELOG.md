@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.7.1...v1.8.0) (2026-08-05)
+
+
+### Features
+
+* **registry:** present Proxy as secure MCP gateway ([#21](https://github.com/lightnow-ai/lightnow-proxy/issues/21)) ([b431798](https://github.com/lightnow-ai/lightnow-proxy/commit/b431798b71a9b8fcf77aa8dc285fd9cb78fd1ec6))
+
 ## [1.7.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.7.0...v1.7.1) (2026-08-02)
 
 
