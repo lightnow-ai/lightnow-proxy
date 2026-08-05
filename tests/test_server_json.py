@@ -53,8 +53,16 @@ def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> Non
 
     assert listing["title"] == "LightNow MCP Proxy"
     assert listing["description"] == (
-        "Connect your AI clients with your favorite MCP servers - securely managed from one place."
+        "Connect your AI clients to your MCP servers—securely managed in one place."
     )
     assert 1 <= len(listing["description"]) <= 100
     assert "echo__echo" not in serialized
     assert "synthetic" not in serialized
+
+
+def test_public_copy_advertises_current_mcp_protocol() -> None:
+    readme = (ROOT / "README.md").read_text()
+
+    assert "MCP `2026-07-28`" in readme
+    assert "`server/discover`" in readme
+    assert "through `2025-11-25`" in readme

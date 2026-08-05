@@ -47,15 +47,42 @@ Before publishing the Registry listing:
    ```bash
    mcp-publisher validate
    ```
-6. Verify the published package with the official MCP Inspector CLI. The two
-   `--` separators keep Inspector options separate from Proxy options:
+6. Verify the published package with MCP Inspector 2 in modern protocol mode.
+   Inspector 2 requires stdio server arguments in a config file:
    ```bash
-   npx -y @modelcontextprotocol/inspector@latest \
-     --cli --method tools/list uvx -- -- \
-     lightnow-proxy@1.6.0 \
-     --config ~/.lightnow/lightnow-proxy/default.yaml \
-     --transport stdio
+   RELEASE_VERSION="$(uv run python -c 'from lightnow_proxy import __version__; print(__version__)')"
+   PROXY_CONFIG="${HOME}/.lightnow/lightnow-proxy/default.yaml"
+
+   jq -n --arg version "$RELEASE_VERSION" --arg config "$PROXY_CONFIG" '{
+     mcpServers: {
+       "lightnow-proxy": {
+         type: "stdio",
+         command: "uvx",
+         args: [
+           ("lightnow-proxy@" + $version),
+           "--config", $config,
+           "--transport", "stdio"
+         ],
+         protocolEra: "modern"
+       }
+     }
+   }' > /tmp/lightnow-proxy-inspector.json
+
+   npx -y @modelcontextprotocol/inspector@2.0.0 --cli \
+     --config /tmp/lightnow-proxy-inspector.json \
+     --server lightnow-proxy --method initialize --format json
+   npx -y @modelcontextprotocol/inspector@2.0.0 --cli \
+     --config /tmp/lightnow-proxy-inspector.json \
+     --server lightnow-proxy --method tools/list --format json
+   npx -y @modelcontextprotocol/inspector@2.0.0 --cli \
+     --config /tmp/lightnow-proxy-inspector.json \
+     --server lightnow-proxy --method resources/list --format json
+   rm /tmp/lightnow-proxy-inspector.json
    ```
+   Confirm that initialization selects MCP `2026-07-28`, advertises `tools`
+   and `resources`, and that list results contain only real capabilities from
+   the selected LightNow profile. The proxy remains dual-era compatible with
+   handshake-based peers through `2025-11-25`.
 7. Authenticate with the Registry:
    ```bash
    mcp-publisher login github

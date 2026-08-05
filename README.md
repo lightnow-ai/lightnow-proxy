@@ -4,8 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
 
-**Connect your AI clients with your favorite MCP servers - securely managed from
-one place.**
+**Connect your AI clients to your MCP servers—securely managed in one place.**
 
 The LightNow MCP Proxy is the local runtime behind LightNow profiles.
 Connect Codex, Claude Desktop, Cursor, VS Code, or Antigravity once, then manage
@@ -17,8 +16,9 @@ configuration and secrets into every tool.
 - Resolve credentials on the user's machine instead of embedding them in MCP
   client configuration.
 - Apply profile and policy changes without rebuilding every client setup.
-- Observe client, profile, server health, and tool usage without collecting tool
-  results or resolved secrets.
+- Observe client, profile, server health, and tool usage. Tool arguments are
+  captured by default with credential-like fields redacted and can be disabled;
+  tool results and resolved secrets are never collected.
 
 The installed command remains `lightnow-proxy`. It runs locally, uses the
 identity-bound LightNow CLI session, resolves the selected profile, and routes
@@ -32,7 +32,8 @@ LightNow profile, so the list differs between teams and clients. Names such as
 `github__create_issue` identify both the upstream server and its tool and avoid
 collisions when several servers use the same tool name.
 
-The proxy supports the official MCP `2026-07-28` revision and keeps automatic
+The proxy supports the official MCP `2026-07-28` revision with stateless,
+per-request protocol metadata and `server/discover`. It keeps automatic
 compatibility with handshake-era servers and clients through `2025-11-25`.
 
 ## Install
