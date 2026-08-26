@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    "default:automergeDigest",
+    ":automergeStableNonMajor",
+    ":configMigration",
+    ":enableVulnerabilityAlerts",
+    ":maintainLockFilesWeekly",
+    "abandonments:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Wait for normal PyPI releases to mature before automated adoption; vulnerability fixes remain immediate.",
+      "matchDatasources": [
+        "pypi"
+      ],
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Release and CI workflow changes require human review because tag-only publishing paths do not run on pull requests.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "automerge": false
+    }
+  ],
+  "platformAutomerge": false
+}
