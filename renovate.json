@@ -21,7 +21,7 @@
     },
     {
       "description": "Keep the published runtime on Python 3.12 and require human review for runtime updates.",
-      "matchPackageNames": [
+      "matchDepNames": [
         "python"
       ],
       "allowedVersions": "<3.13",
