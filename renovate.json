@@ -20,6 +20,14 @@
       "minimumReleaseAge": "14 days"
     },
     {
+      "description": "Keep the published runtime on Python 3.12 and require human review for runtime updates.",
+      "matchPackageNames": [
+        "python"
+      ],
+      "allowedVersions": "<3.13",
+      "automerge": false
+    },
+    {
       "description": "Release and CI workflow changes require human review because tag-only publishing paths do not run on pull requests.",
       "matchManagers": [
         "github-actions"
