@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.8.0...v1.9.0) (2026-08-28)
+
+
+### Features
+
+* **runtime:** materialize managed profile files ([#49](https://github.com/lightnow-ai/lightnow-proxy/issues/49)) ([c8fcbe9](https://github.com/lightnow-ai/lightnow-proxy/commit/c8fcbe9eb1ecf25f5b2576c80a3d39f63aac0ee5))
+
+
+### Bug Fixes
+
+* **renovate:** constrain Python dependency names ([#38](https://github.com/lightnow-ai/lightnow-proxy/issues/38)) ([92aed0d](https://github.com/lightnow-ai/lightnow-proxy/commit/92aed0d09f9d986206ca8bc6a4332d363aa97d94))
+
 ## [1.8.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.7.1...v1.8.0) (2026-08-05)
 
 
