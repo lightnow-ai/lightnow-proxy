@@ -8,7 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 import yaml
 
 from lightnow_proxy import __version__
@@ -98,6 +98,8 @@ class ProfileConfig(BaseModel):
 
 
 class RuntimeFileConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     path: str
     content: str
 

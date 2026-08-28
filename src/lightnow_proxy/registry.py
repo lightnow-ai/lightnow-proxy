@@ -391,7 +391,8 @@ class RegistryApiClient:
                 resolved_client_config = await self._resolve_profile_client_config(item, client_config)
                 return ResolvedRuntimeUpstream(
                     name=alias,
-                    config=upstream_config_from_client_config(
+                    config=self._profile_client_upstream_config(
+                        alias,
                         resolved_client_config,
                         runtime_files_root=self.config.resolved_runtime_files_dir(),
                         runtime_files_namespace=self._runtime_files_namespace(profile_name, server_name, alias),
@@ -423,7 +424,8 @@ class RegistryApiClient:
                 raise RegistryApiError(f"Custom profile server {alias!r} is missing client_config")
             return ResolvedRuntimeUpstream(
                 name=alias,
-                config=upstream_config_from_client_config(
+                config=self._profile_client_upstream_config(
+                    alias,
                     client_config,
                     runtime_files_root=self.config.resolved_runtime_files_dir(),
                     runtime_files_namespace=self._runtime_files_namespace(profile_name, server_name, alias),
@@ -432,6 +434,25 @@ class RegistryApiClient:
             )
 
         raise RegistryApiError(f"Registry profile server {alias!r} is not runnable")
+
+    def _profile_client_upstream_config(
+        self,
+        alias: str,
+        client_config: dict[str, Any],
+        *,
+        runtime_files_root: str,
+        runtime_files_namespace: str,
+    ) -> UpstreamConfig:
+        try:
+            return upstream_config_from_client_config(
+                client_config,
+                runtime_files_root=runtime_files_root,
+                runtime_files_namespace=runtime_files_namespace,
+            )
+        except ValidationError as exc:
+            # Pydantic includes rejected input values in its rendered error.
+            # Runtime file content is never safe diagnostic material.
+            raise RegistryApiError(f"Registry profile server {alias!r} has an invalid client configuration") from exc
 
     async def _resolve_profile_client_config(
         self,

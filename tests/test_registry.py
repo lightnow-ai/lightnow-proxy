@@ -108,6 +108,30 @@ def test_custom_stdio_client_config_preserves_managed_runtime_files() -> None:
     assert config.runtime_files_namespace == "default|dbhub"
 
 
+def test_profile_runtime_file_validation_does_not_expose_file_content() -> None:
+    client = RegistryApiClient(
+        RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test")
+    )
+    marker = "credential-that-must-not-appear"
+
+    with pytest.raises(RegistryApiError) as error:
+        client._profile_client_upstream_config(
+            "dbhub",
+            {
+                "transport": "stdio",
+                "command": "dbhub",
+                "runtime_files": [
+                    {"path": "dbhub.toml", "content": marker, "unexpected": True}
+                ],
+            },
+            runtime_files_root="/tmp/lightnow-runtime-files",
+            runtime_files_namespace="default|dbhub",
+        )
+
+    assert str(error.value) == "Registry profile server 'dbhub' has an invalid client configuration"
+    assert marker not in str(error.value)
+
+
 def test_custom_http_client_config_becomes_streamable_http_upstream() -> None:
     config = upstream_config_from_client_config(
         {

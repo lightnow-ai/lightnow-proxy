@@ -99,6 +99,17 @@ def test_rejects_runtime_file_content_that_cannot_be_encoded_as_utf8(tmp_path: P
         )
 
 
+def test_rejects_unknown_runtime_file_properties(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        UpstreamConfig(
+            transport="stdio",
+            command="dbhub",
+            runtime_files=[{"path": "dbhub.toml", "content": "", "mode": "0755"}],
+            runtime_files_root=str(tmp_path),
+            runtime_files_namespace="default|dbhub",
+        )
+
+
 def test_fails_closed_when_an_immutable_revision_is_modified(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     prepared = prepare_runtime_files(config)
