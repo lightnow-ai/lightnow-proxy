@@ -109,7 +109,15 @@ class ToolRouter:
         self.config = config
         self.upstream_client = upstream_client or UpstreamMCPClient()
         self.registry_client = (
-            RegistryApiClient(config.registry_api, RuntimeSecretResolver(config.runtime_secrets))
+            RegistryApiClient(
+                config.registry_api,
+                RuntimeSecretResolver(config.runtime_secrets),
+                runtime_files_connection_id=(
+                    str(config.local_proxy.connection_id)
+                    if config.local_proxy.connection_id
+                    else config.local_proxy.connection_alias
+                ),
+            )
             if config.registry_api and config.registry_api.enabled
             else None
         )

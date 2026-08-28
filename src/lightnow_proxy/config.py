@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import os
 from pathlib import Path
+import re
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -11,6 +12,13 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 import yaml
 
 from lightnow_proxy import __version__
+
+
+_RUNTIME_FILE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _runtime_file_segment_is_safe(value: str) -> bool:
+    return _RUNTIME_FILE_SEGMENT.fullmatch(value) is not None
 
 
 class ServerConfig(BaseModel):
@@ -89,6 +97,35 @@ class ProfileConfig(BaseModel):
         return [item for item in value if item]
 
 
+class RuntimeFileConfig(BaseModel):
+    path: str
+    content: str
+
+    @field_validator("path")
+    @classmethod
+    def path_must_be_relative_and_safe(cls, value: str) -> str:
+        path = Path(value)
+        if (
+            value == ""
+            or len(value.encode("utf-8")) > 512
+            or "\\" in value
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or any(not _runtime_file_segment_is_safe(part) for part in path.parts)
+        ):
+            raise ValueError(f"invalid runtime file path: {value}")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def content_must_be_utf8(cls, value: str) -> str:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("runtime file content must be valid UTF-8 text") from exc
+        return value
+
+
 class UpstreamConfig(BaseModel):
     transport: Literal["streamable-http", "stdio"] = "streamable-http"
     url: HttpUrl | None = None
@@ -98,6 +135,9 @@ class UpstreamConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
+    runtime_files: list[RuntimeFileConfig] = Field(default_factory=list)
+    runtime_files_root: str | None = None
+    runtime_files_namespace: str | None = None
 
     @model_validator(mode="after")
     def transport_settings_are_complete(self) -> "UpstreamConfig":
@@ -105,6 +145,18 @@ class UpstreamConfig(BaseModel):
             raise ValueError("streamable-http upstreams require url")
         if self.transport == "stdio" and not self.command:
             raise ValueError("stdio upstreams require command")
+        if len(self.runtime_files) > 16:
+            raise ValueError("runtime_files must contain at most 16 files")
+        file_sizes = [len(item.content.encode("utf-8")) for item in self.runtime_files]
+        if any(size > 65_536 for size in file_sizes) or sum(file_sizes) > 262_144:
+            raise ValueError("runtime_files exceed the allowed size")
+        paths = [item.path for item in self.runtime_files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("runtime_files paths must be unique")
+        if self.runtime_files and (not self.runtime_files_root or not self.runtime_files_namespace):
+            raise ValueError("runtime_files require a managed root and namespace")
+        if self.runtime_files and self.transport != "stdio":
+            raise ValueError("runtime_files are supported only for stdio upstreams")
         return self
 
     def resolved_headers(self) -> dict[str, str]:
@@ -133,6 +185,7 @@ class RegistryApiConfig(BaseModel):
     expected_issuer: str | None = None
     expected_subject: str | None = None
     cli_tenant_id: str | None = None
+    runtime_files_dir: str = "~/.lightnow/runtime-files"
 
     @model_validator(mode="after")
     def named_cli_session_must_have_identity_guardrails(self) -> "RegistryApiConfig":
@@ -150,6 +203,9 @@ class RegistryApiConfig(BaseModel):
         if self.ca_file is None:
             return None
         return os.path.expanduser(expand_env(self.ca_file))
+
+    def resolved_runtime_files_dir(self) -> str:
+        return os.path.expanduser(expand_env(self.runtime_files_dir))
 
 
 class RuntimeSecretProviderConfig(BaseModel):

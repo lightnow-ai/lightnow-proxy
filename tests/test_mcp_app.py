@@ -17,6 +17,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp import types
 from mcp.types import CallToolResult, TextContent, Tool
 import pytest
+import respx
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
@@ -35,7 +36,7 @@ from lightnow_proxy.config import (
     UpstreamConfig,
 )
 from lightnow_proxy.health import build_health_report
-from lightnow_proxy.registry import ResolvedRuntimeUpstream
+from lightnow_proxy.registry import RegistryApiClient, ResolvedRuntimeUpstream
 from lightnow_proxy.upstream import UpstreamMCPClient
 
 
@@ -1055,6 +1056,78 @@ if __name__ == "__main__":
     result = await client.call_tool(upstream, "echo", {"value": "ok"})
     assert result.is_error is False
     assert result.content[0].text == "echo:ok"
+
+
+@pytest.mark.asyncio
+async def test_stdio_upstream_reads_a_managed_runtime_file(tmp_path) -> None:
+    server = tmp_path / "configured_server.py"
+    server.write_text(
+        """
+import argparse
+import os
+from pathlib import Path
+import tomllib
+
+from mcp.server.mcpserver import MCPServer
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", required=True)
+arguments = parser.parse_args()
+configuration = tomllib.loads(Path(arguments.config).read_text(encoding="utf-8"))
+
+mcp = MCPServer("configured")
+
+@mcp.tool()
+def configured_source() -> str:
+    source = configuration["source"]
+    return f'{source["name"]}:{source["query"]}:{os.environ["DB_PASSWORD"]}'
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry_client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.example.test/v0.1",
+            include_secrets=False,
+            runtime_files_dir=str(tmp_path / "managed-runtime-files"),
+        ),
+        runtime_files_connection_id="connection-1",
+    )
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://registry-api.example.test/v0.1/integrations/profiles/default/servers").respond(
+            200,
+            json={
+                "servers": [
+                    {
+                        "alias": "dbhub-analytics",
+                        "server_name": "custom:dbhub-analytics",
+                        "status": "custom",
+                        "client_config": {
+                            "transport": "stdio",
+                            "command": sys.executable,
+                            "args": [str(server), "--config", "${LIGHTNOW_RUNTIME_DIR}/dbhub.toml"],
+                            "env": {"DB_PASSWORD": "rotated-locally"},
+                            "runtime_files": [
+                                {
+                                    "path": "dbhub.toml",
+                                    "content": '[source]\nname = "analytics"\nquery = "select 1"\n',
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+        )
+        upstreams = await registry_client.fetch_profile_upstreams("default", None)
+
+    assert len(upstreams) == 1
+    result = await UpstreamMCPClient().call_tool(upstreams[0].config, "configured_source", {})
+
+    assert result.is_error is False
+    assert result.content[0].text == "analytics:select 1:rotated-locally"
 
 
 @pytest.mark.asyncio
