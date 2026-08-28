@@ -217,9 +217,16 @@ async def refresh_cli_session(
 
 
 class RegistryApiClient:
-    def __init__(self, config: RegistryApiConfig, runtime_secret_resolver: RuntimeSecretResolver | None = None):
+    def __init__(
+        self,
+        config: RegistryApiConfig,
+        runtime_secret_resolver: RuntimeSecretResolver | None = None,
+        *,
+        runtime_files_connection_id: str | None = None,
+    ):
         self.config = config
         self.runtime_secret_resolver = runtime_secret_resolver
+        self.runtime_files_connection_id = runtime_files_connection_id
         self._access_token: str | None = None
         self._tenant_id: str | None = None
 
@@ -384,7 +391,12 @@ class RegistryApiClient:
                 resolved_client_config = await self._resolve_profile_client_config(item, client_config)
                 return ResolvedRuntimeUpstream(
                     name=alias,
-                    config=upstream_config_from_client_config(resolved_client_config),
+                    config=self._profile_client_upstream_config(
+                        alias,
+                        resolved_client_config,
+                        runtime_files_root=self.config.resolved_runtime_files_dir(),
+                        runtime_files_namespace=self._runtime_files_namespace(profile_name, server_name, alias),
+                    ),
                     server_name=server_name,
                 )
 
@@ -412,11 +424,35 @@ class RegistryApiClient:
                 raise RegistryApiError(f"Custom profile server {alias!r} is missing client_config")
             return ResolvedRuntimeUpstream(
                 name=alias,
-                config=upstream_config_from_client_config(client_config),
+                config=self._profile_client_upstream_config(
+                    alias,
+                    client_config,
+                    runtime_files_root=self.config.resolved_runtime_files_dir(),
+                    runtime_files_namespace=self._runtime_files_namespace(profile_name, server_name, alias),
+                ),
                 server_name=server_name,
             )
 
         raise RegistryApiError(f"Registry profile server {alias!r} is not runnable")
+
+    def _profile_client_upstream_config(
+        self,
+        alias: str,
+        client_config: dict[str, Any],
+        *,
+        runtime_files_root: str,
+        runtime_files_namespace: str,
+    ) -> UpstreamConfig:
+        try:
+            return upstream_config_from_client_config(
+                client_config,
+                runtime_files_root=runtime_files_root,
+                runtime_files_namespace=runtime_files_namespace,
+            )
+        except ValidationError as exc:
+            # Pydantic includes rejected input values in its rendered error.
+            # Runtime file content is never safe diagnostic material.
+            raise RegistryApiError(f"Registry profile server {alias!r} has an invalid client configuration") from exc
 
     async def _resolve_profile_client_config(
         self,
@@ -476,7 +512,16 @@ class RegistryApiClient:
         try:
             return ResolvedRuntimeUpstream(
                 name=upstream.name,
-                config=upstream_config_from_runtime_context(context, upstream),
+                config=upstream_config_from_runtime_context(
+                    context,
+                    upstream,
+                    runtime_files_root=self.config.resolved_runtime_files_dir(),
+                    runtime_files_namespace=self._runtime_files_namespace(
+                        upstream.runtime_profile,
+                        upstream.server,
+                        upstream.alias or upstream.name,
+                    ),
+                ),
                 server_name=upstream.server,
             )
         except (KeyError, TypeError, ValidationError, ValueError) as exc:
@@ -518,6 +563,11 @@ class RegistryApiClient:
         if not isinstance(payload, dict):
             raise RegistryApiError("Registry runtime context response must be a JSON object")
         return payload
+
+    def _runtime_files_namespace(self, profile_name: str, server_name: str, alias: str) -> str:
+        connection = self.runtime_files_connection_id or "unbound"
+        identity = self.config.expected_subject or self.config.cli_tenant_id or "local"
+        return "|".join((str(self.config.base_url), identity, connection, profile_name, server_name, alias))
 
     async def _authorization_headers(self) -> dict[str, str]:
         if self.config.use_cli_session:
@@ -652,6 +702,9 @@ class RegistryApiClient:
 def upstream_config_from_runtime_context(
     context: dict[str, Any],
     upstream: RuntimeUpstreamConfig,
+    *,
+    runtime_files_root: str | None = None,
+    runtime_files_namespace: str | None = None,
 ) -> UpstreamConfig:
     probe_request = context["probe_request"]
     transport = probe_request["transport"]
@@ -674,6 +727,9 @@ def upstream_config_from_runtime_context(
             args=_string_list(stdio_config.get("args")),
             env=_string_map(stdio_config.get("env")),
             timeout_seconds=timeout_seconds,
+            runtime_files=_runtime_file_list(context.get("runtime_files")),
+            runtime_files_root=runtime_files_root,
+            runtime_files_namespace=runtime_files_namespace,
         )
 
     if transport == "sse":
@@ -682,7 +738,12 @@ def upstream_config_from_runtime_context(
     raise RegistryApiError(f"unsupported Registry runtime transport: {transport}")
 
 
-def upstream_config_from_client_config(client_config: dict[str, Any]) -> UpstreamConfig:
+def upstream_config_from_client_config(
+    client_config: dict[str, Any],
+    *,
+    runtime_files_root: str | None = None,
+    runtime_files_namespace: str | None = None,
+) -> UpstreamConfig:
     transport = client_config.get("transport") or "stdio"
     timeout_seconds = _timeout_seconds(client_config)
 
@@ -709,6 +770,9 @@ def upstream_config_from_client_config(client_config: dict[str, Any]) -> Upstrea
             env=_string_map(client_config.get("env")),
             cwd=cwd if isinstance(cwd, str) and cwd else None,
             timeout_seconds=timeout_seconds,
+            runtime_files=_runtime_file_list(client_config.get("runtime_files")),
+            runtime_files_root=runtime_files_root,
+            runtime_files_namespace=runtime_files_namespace,
         )
 
     raise RegistryApiError(f"unsupported custom server transport: {transport}")
@@ -743,6 +807,14 @@ def _string_map(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _runtime_file_list(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise RegistryApiError("runtime_files must be an array of file objects")
+    return [dict(item) for item in value]
 
 
 def _string_list(value: Any) -> list[str]:

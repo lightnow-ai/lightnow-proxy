@@ -174,6 +174,45 @@ non-secret mappings on subsequent syncs. The optional OS-keyring path is
 available with `lightnow-proxy[keyring]`. Resolution failures are fail-closed
 and plaintext values are never added to the tool-schema cache.
 
+### Managed runtime files
+
+STDIO servers may attach bounded, non-secret `runtime_files` to their Runtime
+Profile client configuration. LightNow Proxy writes each file set below
+`~/.lightnow/runtime-files` in an immutable content-addressed directory before
+the upstream process starts. Files use mode `0600`; managed directories use
+mode `0700`.
+
+Reference the resolved directory with `${LIGHTNOW_RUNTIME_DIR}` in arguments,
+environment values, or the working directory:
+
+```json
+{
+  "transport": "stdio",
+  "command": "npx",
+  "args": [
+    "@bytebase/dbhub@latest",
+    "--config",
+    "${LIGHTNOW_RUNTIME_DIR}/dbhub.toml"
+  ],
+  "env": {
+    "DBHUB_DSN": "${DBHUB_DSN}"
+  },
+  "runtime_files": [
+    {
+      "path": "dbhub.toml",
+      "content": "[[sources]]\nid = \"analytics\"\ndsn = \"${DBHUB_DSN}\"\n"
+    }
+  ]
+}
+```
+
+Runtime files are UTF-8 text and are limited to 16 files, 64 KiB per file, and
+256 KiB per server configuration. Paths must be relative and cannot contain
+traversal segments or backslashes. Secret values must remain in LightNow's
+runtime secret buckets; files may refer to the corresponding environment names
+but must not embed plaintext credentials. Invalid or modified materializations
+fail closed before the upstream starts.
+
 ## More Documentation
 
 Detailed setup guides, examples, diagrams, supported client paths, telemetry

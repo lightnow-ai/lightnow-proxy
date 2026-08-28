@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+from pathlib import Path
 import socket
 import sys
 from typing import Any, AsyncIterator
@@ -17,6 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp import types
 from mcp.types import CallToolResult, TextContent, Tool
 import pytest
+import respx
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
@@ -35,7 +37,7 @@ from lightnow_proxy.config import (
     UpstreamConfig,
 )
 from lightnow_proxy.health import build_health_report
-from lightnow_proxy.registry import ResolvedRuntimeUpstream
+from lightnow_proxy.registry import RegistryApiClient, ResolvedRuntimeUpstream
 from lightnow_proxy.upstream import UpstreamMCPClient
 
 
@@ -1055,6 +1057,94 @@ if __name__ == "__main__":
     result = await client.call_tool(upstream, "echo", {"value": "ok"})
     assert result.is_error is False
     assert result.content[0].text == "echo:ok"
+
+
+@pytest.mark.asyncio
+async def test_two_stdio_hosts_read_and_update_a_managed_runtime_file(tmp_path) -> None:
+    server = Path(__file__).parent / "fixtures" / "configured_mcp_server.py"
+
+    def profile_payload(query: str, password: str) -> dict[str, object]:
+        return {
+            "servers": [
+                {
+                    "alias": "dbhub-analytics",
+                    "server_name": "custom:dbhub-analytics",
+                    "status": "custom",
+                    "client_config": {
+                        "transport": "stdio",
+                        "command": sys.executable,
+                        "args": [str(server), "--config", "${LIGHTNOW_RUNTIME_DIR}/dbhub.toml"],
+                        "env": {"DB_PASSWORD": password},
+                        "runtime_files": [
+                            {
+                                "path": "dbhub.toml",
+                                "content": f'[source]\nname = "analytics"\nquery = "{query}"\n',
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    registry_clients = [
+        RegistryApiClient(
+            RegistryApiConfig(
+                enabled=True,
+                base_url="https://registry-api.example.test/v0.1",
+                include_secrets=False,
+                runtime_files_dir=str(tmp_path / host),
+            ),
+            runtime_files_connection_id=f"connection-{index}",
+        )
+        for index, host in enumerate(("host-a", "host-b"), start=1)
+    ]
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://registry-api.example.test/v0.1/integrations/profiles/default/servers").respond(
+            200,
+            json=profile_payload("select 1", "initial-secret"),
+        )
+        initial_upstreams = [await client.fetch_profile_upstreams("default", None) for client in registry_clients]
+
+    initial_results = [
+        await UpstreamMCPClient().call_tool(upstreams[0].config, "configured_source", {})
+        for upstreams in initial_upstreams
+    ]
+    initial_directories = [next((tmp_path / host).rglob("dbhub.toml")).parent for host in ("host-a", "host-b")]
+
+    assert initial_directories[0] != initial_directories[1]
+    assert all(result.is_error is False for result in initial_results)
+    assert [result.content[0].text for result in initial_results] == [
+        "analytics:select 1:initial-secret",
+        "analytics:select 1:initial-secret",
+    ]
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://registry-api.example.test/v0.1/integrations/profiles/default/servers").respond(
+            200,
+            json=profile_payload("select 2", "rotated-secret"),
+        )
+        updated_upstreams = [await client.fetch_profile_upstreams("default", None) for client in registry_clients]
+
+    updated_results = [
+        await UpstreamMCPClient().call_tool(upstreams[0].config, "configured_source", {})
+        for upstreams in updated_upstreams
+    ]
+    updated_directories = [
+        next(
+            path.parent
+            for path in (tmp_path / host).rglob("dbhub.toml")
+            if path.parent != initial_directory
+        )
+        for host, initial_directory in zip(("host-a", "host-b"), initial_directories, strict=True)
+    ]
+
+    assert all(before != after for before, after in zip(initial_directories, updated_directories, strict=True))
+    assert [result.content[0].text for result in updated_results] == [
+        "analytics:select 2:rotated-secret",
+        "analytics:select 2:rotated-secret",
+    ]
+    assert all((directory / "dbhub.toml").read_text(encoding="utf-8").endswith('query = "select 1"\n') for directory in initial_directories)
 
 
 @pytest.mark.asyncio

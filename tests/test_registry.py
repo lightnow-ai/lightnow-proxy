@@ -90,6 +90,48 @@ def test_custom_stdio_client_config_becomes_stdio_upstream() -> None:
     assert config.timeout_seconds == 7
 
 
+def test_custom_stdio_client_config_preserves_managed_runtime_files() -> None:
+    config = upstream_config_from_client_config(
+        {
+            "transport": "stdio",
+            "command": "dbhub",
+            "args": ["--config", "${LIGHTNOW_RUNTIME_DIR}/dbhub.toml"],
+            "runtime_files": [{"path": "dbhub.toml", "content": "readonly = true\n"}],
+        },
+        runtime_files_root="/tmp/lightnow-runtime-files",
+        runtime_files_namespace="default|dbhub",
+    )
+
+    assert config.runtime_files[0].path == "dbhub.toml"
+    assert config.runtime_files[0].content == "readonly = true\n"
+    assert config.runtime_files_root == "/tmp/lightnow-runtime-files"
+    assert config.runtime_files_namespace == "default|dbhub"
+
+
+def test_profile_runtime_file_validation_does_not_expose_file_content() -> None:
+    client = RegistryApiClient(
+        RegistryApiConfig(enabled=True, base_url="https://registry-api.example.test")
+    )
+    marker = "credential-that-must-not-appear"
+
+    with pytest.raises(RegistryApiError) as error:
+        client._profile_client_upstream_config(
+            "dbhub",
+            {
+                "transport": "stdio",
+                "command": "dbhub",
+                "runtime_files": [
+                    {"path": "dbhub.toml", "content": marker, "unexpected": True}
+                ],
+            },
+            runtime_files_root="/tmp/lightnow-runtime-files",
+            runtime_files_namespace="default|dbhub",
+        )
+
+    assert str(error.value) == "Registry profile server 'dbhub' has an invalid client configuration"
+    assert marker not in str(error.value)
+
+
 def test_custom_http_client_config_becomes_streamable_http_upstream() -> None:
     config = upstream_config_from_client_config(
         {
@@ -480,8 +522,7 @@ async def test_registry_client_preserves_profile_aliases_during_legacy_context_f
     )
 
     context_url = (
-        "https://registry-api.lightnow.local/v0.1/servers/"
-        "codex-test1.lightnow%2Frelease-smoke/versions/1.0.1/context"
+        "https://registry-api.lightnow.local/v0.1/servers/codex-test1.lightnow%2Frelease-smoke/versions/1.0.1/context"
     )
     with respx.mock(assert_all_called=True) as router:
         router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
@@ -548,9 +589,7 @@ async def test_registry_client_uses_linked_profile_config_without_reselecting_tr
     )
 
     with respx.mock(assert_all_called=True) as router:
-        route = router.get(
-            "https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers"
-        ).respond(
+        route = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
             200,
             json={
                 "servers": [

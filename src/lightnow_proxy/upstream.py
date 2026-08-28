@@ -14,6 +14,7 @@ from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from lightnow_proxy.config import UpstreamConfig
 from lightnow_proxy.diagnostics import validate_upstream_config
+from lightnow_proxy.runtime_files import prepare_runtime_files
 
 
 class UpstreamMCPClient:
@@ -45,6 +46,7 @@ class UpstreamMCPClient:
         if not config.command:
             raise ValueError("stdio upstream requires command")
 
+        config = prepare_runtime_files(config)
         validate_upstream_config(config)
 
         parameters = StdioServerParameters(
