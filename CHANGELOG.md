@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.9.0...v1.9.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **runtime:** honor disabled profile servers ([8525ce5](https://github.com/lightnow-ai/lightnow-proxy/commit/8525ce50ab380a695a9b6e037738d8f793fecd75))
+
 ## [1.9.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.8.0...v1.9.0) (2026-08-28)
 
 
