@@ -296,7 +296,7 @@ class RegistryApiClient:
         return [
             await self._profile_server_to_upstream(item, profile_name, principal)
             for item in servers
-            if isinstance(item, dict)
+            if isinstance(item, dict) and self._profile_server_enabled(item)
         ]
 
     async def fetch_profile_upstream_names(self, profile_name: str) -> list[str]:
@@ -307,7 +307,7 @@ class RegistryApiClient:
 
         names: list[str] = []
         for item in servers:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not self._profile_server_enabled(item):
                 continue
             alias = item.get("alias")
             if isinstance(alias, str) and alias:
@@ -326,10 +326,15 @@ class RegistryApiClient:
             raise RegistryApiError("Registry profile servers response must include a servers array")
 
         for item in servers:
-            if isinstance(item, dict) and item.get("alias") == alias:
+            if isinstance(item, dict) and self._profile_server_enabled(item) and item.get("alias") == alias:
                 return await self._profile_server_to_upstream(item, profile_name, principal)
 
         raise RegistryApiError(f"Registry profile server {alias!r} is not available")
+
+    @staticmethod
+    def _profile_server_enabled(item: dict[str, Any]) -> bool:
+        client_config = item.get("client_config")
+        return not (isinstance(client_config, dict) and client_config.get("enabled") is False)
 
     async def post_runtime_event(self, payload: dict[str, Any]) -> None:
         headers = await self._authorization_headers()

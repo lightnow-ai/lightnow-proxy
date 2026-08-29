@@ -471,6 +471,16 @@ async def test_registry_client_fetches_mixed_profile_upstreams(tmp_path) -> None
                         "version": "1.0.1",
                         "status": "linked",
                     },
+                    {
+                        "alias": "cloudflare-api",
+                        "server_name": "custom:cloudflare-api",
+                        "status": "custom",
+                        "client_config": {
+                            "enabled": False,
+                            "transport": "http",
+                            "url": "https://mcp.cloudflare.com/mcp",
+                        },
+                    },
                 ]
             },
         )
@@ -841,6 +851,12 @@ async def test_registry_client_fetches_profile_names_without_secrets(tmp_path) -
                 "servers": [
                     {"alias": "grafana", "server_name": "custom:grafana", "status": "custom"},
                     {"alias": "jenkins", "server_name": "custom:jenkins", "status": "custom"},
+                    {
+                        "alias": "cloudflare-api",
+                        "server_name": "custom:cloudflare-api",
+                        "status": "custom",
+                        "client_config": {"enabled": False},
+                    },
                 ]
             },
         )
@@ -849,6 +865,50 @@ async def test_registry_client_fetches_profile_names_without_secrets(tmp_path) -
 
     assert dict(route.calls.last.request.url.params) == {}
     assert names == ["grafana", "jenkins"]
+
+
+@pytest.mark.asyncio
+async def test_registry_client_does_not_resolve_a_disabled_profile_upstream(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "access_token": unsigned_token(int(time.time()) + 3600),
+                "issuer": "https://auth.lightnow.local/realms/lightnow-local",
+                "client_id": "lightnow-cli",
+            }
+        )
+    )
+    client = RegistryApiClient(
+        RegistryApiConfig(
+            enabled=True,
+            base_url="https://registry-api.lightnow.local/v0.1",
+            use_cli_session=True,
+            cli_config_path=str(config_path),
+        )
+    )
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200,
+            json={
+                "servers": [
+                    {
+                        "alias": "cloudflare-api",
+                        "server_name": "custom:cloudflare-api",
+                        "status": "custom",
+                        "client_config": {
+                            "enabled": False,
+                            "transport": "http",
+                            "url": "https://mcp.cloudflare.com/mcp",
+                        },
+                    }
+                ]
+            },
+        )
+
+        with pytest.raises(RegistryApiError, match="is not available"):
+            await client.fetch_profile_upstream("default", "cloudflare-api", None)
 
 
 @pytest.mark.asyncio
