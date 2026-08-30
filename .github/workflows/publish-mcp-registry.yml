@@ -62,9 +62,20 @@ jobs:
             fi
           fi
 
-          curl --fail --silent --show-error \
-            "https://pypi.org/pypi/lightnow-proxy/${manifest_version}/json" \
-            >/dev/null
+          pypi_url="https://pypi.org/pypi/lightnow-proxy/${manifest_version}/json"
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error "$pypi_url" >/dev/null; then
+              break
+            fi
+
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "PyPI release ${manifest_version} did not become visible after 30 attempts" >&2
+              exit 1
+            fi
+
+            echo "PyPI release ${manifest_version} is not visible yet (${attempt}/30); retrying in 10s."
+            sleep 10
+          done
 
           echo "server_name=$server_name" >>"$GITHUB_OUTPUT"
           echo "version=$manifest_version" >>"$GITHUB_OUTPUT"
