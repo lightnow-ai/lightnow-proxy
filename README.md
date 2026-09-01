@@ -3,6 +3,8 @@
 <!-- mcp-name: io.github.lightnow-ai/lightnow-proxy -->
 
 [![PyPI](https://img.shields.io/pypi/v/lightnow-proxy.svg)](https://pypi.org/project/lightnow-proxy/)
+[![Official MCP Registry](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.modelcontextprotocol.io%2Fv0.1%2Fservers%2Fio.github.lightnow-ai%252Flightnow-proxy%2Fversions%2Flatest&query=%24.server.version&label=Official%20MCP%20Registry&logo=modelcontextprotocol)](https://registry.modelcontextprotocol.io/?q=io.github.lightnow-ai%2Flightnow-proxy)
+[![Listed on LightNow](https://lightnow.ai/badge/io.github.lightnow-ai/lightnow-proxy?variant=listed)](https://lightnow.ai/servers/io.github.lightnow-ai/lightnow-proxy)
 
 **Connect your AI clients to your MCP servers—securely managed in one place.**
 
@@ -220,7 +222,7 @@ behavior and troubleshooting live in the LightNow docs:
 
 - [Connect MCP clients](https://docs.lightnow.ai/getting-started/sync-mcp-clients)
 - [CLI reference](https://docs.lightnow.ai/reference/cli)
-- [Release process](docs/release.md)
+- [Release process](https://github.com/lightnow-ai/lightnow-proxy/blob/main/docs/release.md)
 
 ## Local Development
 
