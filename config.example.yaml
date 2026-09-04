@@ -1,8 +1,3 @@
-server:
-  host: "127.0.0.1"
-  port: 8080
-  public_url: "http://localhost:8080"
-
 local_proxy:
   enabled: true
   connection_id: "10d45f35-3143-482b-bda2-7f3931667049"
@@ -11,7 +6,6 @@ local_proxy:
   scope_type: "personal"
   scope_id: "user-subject"
   account_label: "Developer"
-  path: "/mcp"
   client_name: "codex"
   client_version: null
   runner_name: "lightnow-local-proxy"

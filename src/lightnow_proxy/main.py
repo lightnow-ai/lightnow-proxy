@@ -37,12 +37,6 @@ def main() -> None:
         help=f"Path to the LightNow Proxy YAML config. Defaults to {DEFAULT_CONFIG_PATH}.",
     )
     parser.add_argument(
-        "--transport",
-        choices=["http", "stdio"],
-        default=os.environ.get("LIGHTNOW_PROXY_TRANSPORT", os.environ.get("MCP_PROXY_TRANSPORT", "http")),
-        help="Client-facing transport to serve.",
-    )
-    parser.add_argument(
         "--capture-path",
         default=os.environ.get("LIGHTNOW_PROXY_CAPTURE_PATH", os.environ.get("MCP_PROXY_CAPTURE_PATH")),
         help="Optional text file for redacted inbound MCP initialize/request capture.",
@@ -83,7 +77,7 @@ def main() -> None:
     if args.warm_tools_cache:
         anyio.run(warm_tools_cache, config)
         return
-    if args.transport == "stdio":
+    if config.local_proxy.enabled:
         anyio.run(run_stdio, config, args.capture_path, config_path)
         return
 
@@ -108,7 +102,7 @@ async def warm_tools_cache(config: ProxyConfig) -> None:
 
 async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config_path: str = "") -> None:
     if not config.local_proxy.enabled:
-        raise RuntimeError("stdio transport requires local_proxy.enabled=true")
+        raise RuntimeError("local proxy requires local_proxy.enabled=true")
 
     router = ToolRouter(config)
     server = LocalProxyMCPApp(config, router).server
