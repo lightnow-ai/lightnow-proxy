@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.2](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.9.1...v1.9.2) (2026-09-04)
+
+
+### Bug Fixes
+
+* **deps:** update Ruff to 0.16 ([4961e8d](https://github.com/lightnow-ai/lightnow-proxy/commit/4961e8d82b5a1ff2b230abb4ed0130fff45cfbf5))
+
+
+### Documentation
+
+* add registry badges ([74a8578](https://github.com/lightnow-ai/lightnow-proxy/commit/74a857896bc0a405ce8f013bbbb9cc09a7c34666))
+
 ## [1.9.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.9.0...v1.9.1) (2026-08-29)
 
 
