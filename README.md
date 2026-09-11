@@ -240,11 +240,9 @@ Run the proxy with the example config:
 uv run lightnow-proxy --config config.example.yaml
 ```
 
-Run the proxy as a stdio MCP server:
-
-```sh
-uv run lightnow-proxy --config config.example.yaml --transport stdio
-```
+Local Proxy mode always communicates with the launching MCP client over
+standard input and output. Configured upstream MCP servers may independently
+use `stdio` or Streamable HTTP.
 
 Run a local health check against the example config:
 

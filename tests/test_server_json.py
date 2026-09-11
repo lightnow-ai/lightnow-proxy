@@ -37,14 +37,12 @@ def test_registry_listing_requires_a_real_lightnow_profile() -> None:
     listing = load_listing()
     package_arguments = listing["packages"][0]["packageArguments"]
     config_argument = next(argument for argument in package_arguments if argument["name"] == "--config")
-    transport_argument = next(argument for argument in package_arguments if argument["name"] == "--transport")
 
     assert config_argument["isRequired"] is True
     assert config_argument["format"] == "filepath"
     assert config_argument["placeholder"] == "~/.lightnow/lightnow-proxy/default.yaml"
     assert "lightnow sync" in config_argument["description"]
-    assert transport_argument["value"] == "stdio"
-    assert [argument["name"] for argument in package_arguments] == ["--config", "--transport"]
+    assert [argument["name"] for argument in package_arguments] == ["--config"]
 
 
 def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> None:
@@ -52,9 +50,7 @@ def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> Non
     serialized = json.dumps(listing).lower()
 
     assert listing["title"] == "LightNow MCP Proxy"
-    assert listing["description"] == (
-        "Connect your AI clients to your MCP servers—securely managed in one place."
-    )
+    assert listing["description"] == ("Connect your AI clients to your MCP servers—securely managed in one place.")
     assert 1 <= len(listing["description"]) <= 100
     assert "echo__echo" not in serialized
     assert "synthetic" not in serialized
