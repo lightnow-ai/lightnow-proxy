@@ -238,7 +238,7 @@ Jenkins builds the runtime image, runs the Ruff and pytest commands from
 `make lint test` inside it, then checks `lightnow-proxy --help`.
 The checkout is mounted read-only and test environments live in the container.
 The `Jenkinsfile` uses the native
-`container-build-amd64` pool and removes only its own validation image.
+`build-agent` capability pool and removes only its own validation image. The timeout includes agent allocation.
 GitHub Actions continues to run the Python version matrix. Before merging an
 Ops dependency update, require terminal Jenkins success at the current PR head.
 The pipeline validates changes without publishing an image or changing accounts.
