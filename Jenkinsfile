@@ -46,7 +46,11 @@ pipeline {
             }
             post {
                 always {
-                    sh 'if test -n "${VALIDATION_IMAGE:-}"; then docker image rm "${VALIDATION_IMAGE}" >/dev/null 2>&1 || true; fi'
+                    script {
+                        if (env.VALIDATION_IMAGE) {
+                            sh 'docker image rm "${VALIDATION_IMAGE}" >/dev/null 2>&1 || true'
+                        }
+                    }
                 }
             }
         }
