@@ -1,7 +1,6 @@
 pipeline {
     agent { label 'container-build-amd64' }
     options {
-        timestamps()
         disableConcurrentBuilds()
         timeout(time: 20, unit: 'MINUTES')
     }
