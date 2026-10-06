@@ -1,8 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended",
-    "docker:pinDigests",
+    "github>apitree/renovate:python#v1.0.2",
+    "github>apitree/renovate:docker#v1.0.2",
     "helpers:pinGitHubActionDigests",
     "default:automergeDigest",
     ":automergeStableNonMajor",
@@ -33,6 +33,14 @@
         "github-actions"
       ],
       "automerge": false
+    },
+    {
+      "description": "Keep JWT authentication library updates independently reviewable.",
+      "matchPackageNames": [
+        "pyjwt"
+      ],
+      "groupName": null,
+      "groupSlug": null
     }
   ],
   "platformAutomerge": false
