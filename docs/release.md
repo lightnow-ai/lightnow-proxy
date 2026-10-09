@@ -180,3 +180,26 @@ Manual release checklist for fallback or first-time setup:
     LightNow CLI against the local or production Registry API.
 
 Do not publish with long-lived local PyPI tokens.
+
+## PR distribution provenance
+
+PR CI archives `feature-stack-client-artifact.json` alongside the wheel and
+source distribution in `python-distributions`. The manifest uses
+`platform.lightnow.ai/feature-stack-client-artifact/v1` and binds the universal
+wheel SHA-256 and its actual METADATA name/version to the PR number, head
+revision, tested checkout revision, workflow, run ID, and run attempt. The head
+and tested merge checkout are separate fields. Consumers must verify these
+bindings and the wheel checksum against the selected successful CI run before
+installing a candidate; the manifest itself is build metadata, not a signature
+or a runtime test result.
+
+The generator uses only Python's standard library. After a clean package build,
+run its focused offline contract checks with:
+
+```bash
+python -m unittest discover -s ci -p 'test_*.py'
+```
+
+Main CI does not fabricate PR metadata. Tagged release publishing is unchanged:
+release consumers qualify the exact Git tag and published PyPI wheel separately.
+The PR-only JSON never enters the existing PyPI release upload.
