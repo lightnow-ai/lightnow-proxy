@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.9.2](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.9.1...v1.9.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* **ci:** use installed Jenkins pipeline options ([6992dba](https://github.com/lightnow-ai/lightnow-proxy/commit/6992dbadd07da7b75c6a0ccc522af1f63fe6cdbd))
+* **deps:** bound Ruff before breaking lint rules ([d322aa6](https://github.com/lightnow-ai/lightnow-proxy/commit/d322aa6e7efde6c870277f17e034035827446aee))
+* **deps:** update Ruff to 0.16 ([4961e8d](https://github.com/lightnow-ai/lightnow-proxy/commit/4961e8d82b5a1ff2b230abb4ed0130fff45cfbf5))
+* **renovate:** allow checked Python runtime digest refreshes ([#77](https://github.com/lightnow-ai/lightnow-proxy/issues/77)) ([a3f9744](https://github.com/lightnow-ai/lightnow-proxy/commit/a3f974414d54416d2f55816ead4bb36afcc1a91c))
+
+
+### Documentation
+
+* add registry badges ([74a8578](https://github.com/lightnow-ai/lightnow-proxy/commit/74a857896bc0a405ce8f013bbbb9cc09a7c34666))
+
 ## [1.9.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.9.0...v1.9.1) (2026-08-29)
 
 
