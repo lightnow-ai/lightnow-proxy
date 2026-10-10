@@ -13,14 +13,18 @@
   ],
   "packageRules": [
     {
-      "description": "Wait for normal PyPI releases to mature before automated adoption; vulnerability fixes remain immediate.",
+      "description": [
+        "Wait for normal PyPI releases to mature before automated adoption; vulnerability fixes remain immediate."
+      ],
       "matchDatasources": [
         "pypi"
       ],
       "minimumReleaseAge": "14 days"
     },
     {
-      "description": "Keep the published runtime on Python 3.12 and require human review for runtime updates.",
+      "description": [
+        "Keep the published runtime on Python 3.12 and require human review for runtime updates."
+      ],
       "matchDepNames": [
         "python"
       ],
@@ -28,20 +32,41 @@
       "automerge": false
     },
     {
-      "description": "Release and CI workflow changes require human review because tag-only publishing paths do not run on pull requests.",
+      "description": [
+        "Release and CI workflow changes require human review because tag-only publishing paths do not run on pull requests."
+      ],
       "matchManagers": [
         "github-actions"
       ],
       "automerge": false
     },
     {
-      "description": "Keep JWT authentication library updates independently reviewable.",
+      "description": [
+        "Keep JWT authentication library updates independently reviewable."
+      ],
       "matchPackageNames": [
         "pyjwt"
       ],
       "groupName": null,
-      "groupSlug": null
+      "groupSlug": null,
+      "automerge": false
+    },
+    {
+      "description": [
+        "Merge immutable Python 3.12 digest refreshes after repository checks pass; runtime version upgrades remain reviewed."
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "automerge": true
     }
   ],
-  "platformAutomerge": false
+  "platformAutomerge": false,
+  "automergeType": "pr"
 }
