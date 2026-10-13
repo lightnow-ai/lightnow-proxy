@@ -1,8 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "github>apitree/renovate:python#v1.0.2",
-    "github>apitree/renovate:docker#v1.0.2",
+    "github>apitree/renovate:python",
+    "github>apitree/renovate:docker",
     "helpers:pinGitHubActionDigests",
     "default:automergeDigest",
     ":automergeStableNonMajor",
