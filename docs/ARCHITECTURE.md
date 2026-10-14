@@ -13,7 +13,7 @@ This lets LightNow move from "every client contains every MCP server config" to
 
 ```text
 MCP client
-  -> http://127.0.0.1:{port}/mcp
+  -> stdio
   -> LightNow Local Proxy
   -> active profile
   -> configured upstream MCP server
@@ -48,15 +48,15 @@ capability-bridging design is implemented.
 
 ## Local Proxy Mode
 
-When `local_proxy.enabled` is `true`, the app exposes only the configured local
-MCP endpoint, for example `/mcp`. The legacy profile endpoint shape
-`/profiles/{profile}/mcp` is not mounted in this mode.
+When `local_proxy.enabled` is `true`, the process serves the selected profile
+over standard input and output. Desktop MCP clients launch one proxy process
+for each configured LightNow connection. The legacy HTTP profile endpoint shape
+is available only when `local_proxy.enabled` is `false`.
 
 ```yaml
 local_proxy:
   enabled: true
   profile: default
-  path: /mcp
   client_name: codex
   runner_name: lightnow-local-proxy
   client_transport: stdio
@@ -72,11 +72,9 @@ profiles:
       - math
 ```
 
-The local MCP endpoint is unauthenticated because desktop MCP clients start it
-as a local process. It therefore validates MCP HTTP `Host` and `Origin` headers
-and allows only loopback browser origins. A non-loopback `server.public_url` is
-ignored for Local Proxy browser-origin allowlisting; Local Proxy mode is not a
-remote hosted endpoint.
+The client-facing stdio connection needs no listening port or HTTP
+authentication because the desktop MCP client owns the child process and its
+input/output streams. Local Proxy mode is not a remote hosted endpoint.
 
 ## Upstream Transports
 
@@ -86,7 +84,7 @@ The Local Proxy can route to both currently relevant MCP transport classes:
   environment.
 - `streamable-http`: call a reachable MCP server over HTTP.
 
-Both transports can sit behind the same local client-facing `/mcp` endpoint. In
+Both transports can sit behind the same client-facing stdio connection. In
 practice, `stdio` upstreams are the strongest reason for a local proxy because a
 hosted service cannot run customer-local binaries or reach customer-local files
 without a separate enterprise deployment model.
@@ -150,16 +148,9 @@ their values replaced by `[REDACTED]`.
 
 ## Status And Active Checks
 
-`/status` is the canonical non-secret local status endpoint. By default it
-returns static runtime posture: local proxy mode, selected profile, runner
-identity, client identity, telemetry flag, observe/enforce policy posture,
-unmanaged-server policy, Registry API usage flags, profile names and static
-upstream names. It is meant for local installers and support tooling that need
-to inspect the configured posture without touching upstream MCP servers.
-
-`/status?check=upstreams` and `lightnow-proxy --health` perform an active
-upstream check. They resolve the selected profile and run tool discovery against
-each upstream MCP server. The report classifies the proxy as:
+`lightnow-proxy --health` is the canonical non-secret Local Proxy status check.
+It resolves the selected profile and runs tool discovery against each upstream
+MCP server. The report classifies the proxy as:
 
 - `healthy`: the selected profile resolves and all upstreams answer.
 - `degraded`: the proxy can run, but at least one upstream failed or the active

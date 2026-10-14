@@ -60,8 +60,7 @@ Before publishing the Registry listing:
          command: "uvx",
          args: [
            ("lightnow-proxy@" + $version),
-           "--config", $config,
-           "--transport", "stdio"
+           "--config", $config
          ],
          protocolEra: "modern"
        }
