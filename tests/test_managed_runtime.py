@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
+from datetime import UTC, datetime, timedelta
 import json
 import re
 from pathlib import Path
@@ -24,7 +26,7 @@ from lightnow_proxy.registry import ManagedRuntime, RegistryApiError
 from lightnow_proxy.router import ToolRouter, unwrap_error
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.config import RuntimeSecretsConfig
-from lightnow_proxy.upstream import ToolInventory
+from lightnow_proxy.upstream import ToolDiscoveryError, ToolInventory
 from test_mcp_app import run_math_upstream_server
 
 REGISTRY = "https://registry.example.test/v0.1"
@@ -138,6 +140,136 @@ def managed_router(tmp_path: Path) -> ToolRouter:
             name="legacy-bypass", server="public.example/bypass", version="1.0.0")])},
         upstreams={"docs": UpstreamConfig(url="https://must-not-run.example.test/mcp"), "bypass": UpstreamConfig(url="https://must-not-run.example.test/mcp")},
     ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "stdio"])
+async def test_heartbeat_executes_exact_queued_inventory_without_business_call(tmp_path, transport):
+    async with managed_upstream(transport, tmp_path) as (config, calls):
+        router = managed_router(tmp_path)
+        router.config.local_proxy.device_installation_id = str(uuid4())
+        router.config.local_proxy.client_instance_id = str(uuid4())
+        router.config.local_proxy.device_hostname = "fixture"
+        context = managed_context()
+        request = {key: value for key, value in context.items() if key in {
+            "connection_id", "connection_revision", "profile_id", "profile_revision", "policy_revision", "profile",
+            "assignment_id", "assignment_revision", "runtime_client_id", "credential_binding_id", "credential_revision",
+        }}
+        request.update(id=DISCOVERY, status="queued", etag='"fixture:1"', expires_at=(datetime.now(UTC) + timedelta(seconds=120)).isoformat())
+        item = {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "managed_runtime_required"}
+        reports = []
+
+        def profile_response(incoming):
+            entry = dict(item)
+            if incoming.url.params.get("include") == "secrets":
+                assert incoming.url.params["alias"] == "docs"
+                entry.update(status="linked", managed=context, client_config=config)
+            return httpx.Response(200, json={"servers": [entry]})
+
+        def report_response(incoming):
+            assert incoming.headers["If-Match"] == request["etag"]
+            body = json.loads(incoming.content)
+            reports.append(body)
+            assert body["context_proof"] == context["context_proof"]
+            assert body["status"] == "complete" and body["page_count"] == (2 if transport == "http" else 1)
+            assert {tool["name"] for tool in body["tools"]} == {"read", "write"}
+            return httpx.Response(200, json={"authorization": {"schema_version": 1, "expires_at": context["expires_at"], "allowed_tools": []}})
+
+        with respx.mock(assert_all_called=True) as mock:
+            mock.post(re.compile(REGISTRY + r"/integrations/devices/.*/clients/.*/heartbeat")).respond(200, json={
+                "device": {"clients": [{"id": CLIENT, "client_instance_id": str(router.config.local_proxy.client_instance_id)}]},
+                "managed_discovery_requests": [request, request],
+            })
+            mock.get(REGISTRY + "/integrations/profiles/default/servers").mock(side_effect=profile_response)
+            mock.put(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").mock(side_effect=report_response)
+            assert await router.send_device_heartbeat()
+            assert len(router._discovery_tasks) == 1
+            await asyncio.gather(*router._discovery_tasks.values())
+        assert len(reports) == 1 and calls() == []
+        assert router.device_heartbeat_status()["interval_seconds"] == 15
+
+
+@pytest.mark.asyncio
+async def test_discovery_scheduler_bounds_work_and_shutdown_cancels_it(tmp_path, monkeypatch):
+    router = managed_router(tmp_path)
+    router.registry_client.runtime_client_id = CLIENT
+    stopped = []
+
+    async def wait_for_shutdown(request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.append(request["id"])
+
+    monkeypatch.setattr(router, "_run_discovery", wait_for_shutdown)
+    request = {"profile": "default", "runtime_client_id": CLIENT, "status": "queued",
+               "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+    router._schedule_discoveries([{**request, "id": str(uuid4())} for _ in range(20)])
+    await asyncio.sleep(0)
+    assert len(router._discovery_tasks) == 2
+
+    async def heartbeat():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(router, "send_device_heartbeat", heartbeat)
+    with pytest.raises(asyncio.CancelledError):
+        await router.run_device_heartbeat_loop()
+    assert len(stopped) == 2 and not router._discovery_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["profile_revision", "policy_revision", "credential_revision", "connection_revision", "assignment_revision"])
+async def test_queued_discovery_never_opens_upstream_after_input_revision_changed(tmp_path, monkeypatch, field):
+    router = managed_router(tmp_path)
+    router.registry_client.runtime_client_id = CLIENT
+    context = managed_context()
+    request = {**context, "id": DISCOVERY, "status": "queued", "etag": '"fixture:1"',
+               "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+    request[field] -= 1
+    opened = []
+
+    @asynccontextmanager
+    async def forbidden_session(_config):
+        opened.append(True)
+        raise AssertionError("Stale queued input reached upstream")
+        yield
+
+    monkeypatch.setattr(router.upstream_client, "session", forbidden_session)
+    item = {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "linked",
+            "managed": context, "client_config": {"transport": "http", "url": "https://fixture.example.test/mcp"}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(REGISTRY + "/integrations/profiles/default/servers").respond(200, json={"servers": [item]})
+        await router._run_discovery(request)
+    assert not opened
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,status,reason", [
+    (ToolDiscoveryError("DISCOVERY_LIMIT_EXCEEDED"), "partial", "DISCOVERY_LIMIT_EXCEEDED"),
+    (RuntimeError("private upstream credentials and definitions"), "startup_failed", "RUNTIME_START_FAILED"),
+])
+async def test_queued_discovery_reports_failure_without_private_error_or_partial_manifest(tmp_path, monkeypatch, failure, status, reason):
+    router = managed_router(tmp_path)
+    router.registry_client.runtime_client_id = CLIENT
+    context = managed_context()
+    request = {**context, "id": DISCOVERY, "status": "queued", "etag": '"fixture:1"',
+               "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+
+    @asynccontextmanager
+    async def failed_session(_config):
+        raise failure
+        yield
+
+    monkeypatch.setattr(router.upstream_client, "session", failed_session)
+    item = {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "linked",
+            "managed": context, "client_config": {"transport": "http", "url": "https://fixture.example.test/mcp"}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(REGISTRY + "/integrations/profiles/default/servers").respond(200, json={"servers": [item]})
+        report = mock.put(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").respond(200, json={"data": {"status": status}})
+        await router._run_discovery(request)
+        body = json.loads(report.calls.last.request.content)
+        assert body == {"context_proof": context["context_proof"], "status": status, "reason_code": reason,
+                        "page_count": 0, "duration_ms": body["duration_ms"]}
 
 
 @pytest.mark.asyncio

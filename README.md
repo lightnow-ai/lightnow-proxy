@@ -48,8 +48,14 @@ schema-mismatch recovery and interactive retries must return to its policy gate.
 
 For managed connections the existing device heartbeat declares
 `managed-connections.v1` and obtains the actor-owned runtime client ID, even when
-optional activity capture is disabled. Registry supplies the canonical connection,
-assignment and bounded bootstrap context. Complete private inventory reporting
+optional activity capture is disabled.
+Compatible synchronized proxies poll every 15 seconds and execute at most two
+queued private discoveries concurrently. They resolve the exact current assignment,
+compare queued profile, policy and credential revisions before opening the upstream,
+and report to the original request with If-Match. Shutdown cancels outstanding
+discovery work; failures report bounded codes without private definitions or raw
+upstream errors. Legacy presence-only clients retain the 120-second interval.
+Registry supplies the canonical connection, assignment and bounded bootstrap context. Complete private inventory reporting
 returns exact allowed original names from the same backend authorizer as dispatch.
 The Proxy filters discovery and checks that decision again on the actual upstream
 session before one business call. Expected managed denials return a normal MCP tool

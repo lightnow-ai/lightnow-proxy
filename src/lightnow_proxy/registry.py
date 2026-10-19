@@ -430,15 +430,32 @@ class RegistryApiClient:
                 etag = response.headers["ETag"]
             except (KeyError, TypeError, ValueError):
                 raise RegistryApiError("INVALID_DISCOVERY_RESPONSE") from None
-            managed.assert_current()
-            report = {"context_proof": managed.context_proof, "status": "complete", "page_count": inventory.page_count,
-                      "duration_ms": inventory.duration_ms,
-                      "tools": [tool.model_dump(by_alias=True, mode="json", exclude_none=True) for tool in inventory.tools]}
-            if original_tool_name is not None:
-                report["original_tool_name"] = original_tool_name
-            response = await client.put(f"{base}/{attempt_id}", headers={**headers, "If-Match": etag}, json=report)
+        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name)
+
+    async def report_discovery(
+        self, managed: ManagedRuntime, attempt_id: str, etag: str, report: dict[str, Any],
+    ) -> dict[str, Any]:
+        managed.assert_current()
+        headers = await self._authorization_headers()
+        url = self._api_url(f"/integrations/connections/{managed.connection_id}/tool-discoveries/{UUID(attempt_id)}")
+        async with self._http_client() as client:
+            response = await client.put(url, headers={**headers, "If-Match": etag}, json={**report, "context_proof": managed.context_proof})
             response.raise_for_status()
-            authorization = response.json().get("authorization")
+            payload = response.json()
+        managed.assert_current()
+        if not isinstance(payload, dict):
+            raise RegistryApiError("INVALID_DISCOVERY_RESPONSE")
+        return payload
+
+    async def report_inventory(
+        self, managed: ManagedRuntime, inventory: ToolInventory, attempt_id: str, etag: str,
+        original_tool_name: str | None = None,
+    ) -> set[str]:
+        report = {"status": "complete", "page_count": inventory.page_count, "duration_ms": inventory.duration_ms,
+                  "tools": [tool.model_dump(by_alias=True, mode="json", exclude_none=True) for tool in inventory.tools]}
+        if original_tool_name is not None:
+            report["original_tool_name"] = original_tool_name
+        authorization = (await self.report_discovery(managed, attempt_id, etag, report)).get("authorization")
         if (not isinstance(authorization, dict) or authorization.get("schema_version") != 1
                 or type(authorization.get("expires_at")) is not int or authorization["expires_at"] != managed.expires_at
                 or not isinstance(authorization.get("allowed_tools"), list)

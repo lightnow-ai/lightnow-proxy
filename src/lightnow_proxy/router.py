@@ -21,11 +21,12 @@ from lightnow_proxy.diagnostics import diagnostic_for_exception
 from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient, RegistryApiError, managed_tool_namespace
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
-from lightnow_proxy.upstream import ToolInventory, UpstreamMCPClient
+from lightnow_proxy.upstream import ToolDiscoveryError, ToolInventory, UpstreamMCPClient
 from lightnow_proxy.version_inventory import heartbeat_version_fields
 
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
+MANAGED_HEARTBEAT_INTERVAL_SECONDS = 15
 REDACTED_ARGUMENT_VALUE = "[REDACTED]"
 SENSITIVE_ARGUMENT_KEY_PARTS = {
     "apikey",
@@ -127,6 +128,7 @@ class ToolRouter:
         self.device_heartbeat_last_attempt_at: datetime | None = None
         self.device_heartbeat_last_success_at: datetime | None = None
         self.device_heartbeat_last_error: str | None = None
+        self._discovery_tasks: dict[str, asyncio.Task[None]] = {}
 
     def update_client_context(
         self,
@@ -762,6 +764,8 @@ class ToolRouter:
             for client in result.get("device", {}).get("clients", []):
                 if client.get("client_instance_id") == str(local_proxy.client_instance_id):
                     self.registry_client.runtime_client_id = str(UUID(client["id"]))
+            if local_proxy.sync_from_lightnow and self.registry_client.runtime_client_id is not None:
+                self._schedule_discoveries(result.get("managed_discovery_requests"))
         except Exception as exc:
             self.device_heartbeat_last_error = error_message(exc)
             logger.warning("failed to post LightNow device heartbeat: %s", exc)
@@ -773,15 +777,103 @@ class ToolRouter:
 
     async def run_device_heartbeat_loop(self) -> None:
         """Send immediately, then let each regular interval serve as the only retry."""
-        while True:
-            await self.send_device_heartbeat()
-            await asyncio.sleep(DEVICE_HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            while True:
+                await self.send_device_heartbeat()
+                await asyncio.sleep(self._heartbeat_interval())
+        finally:
+            tasks = list(self._discovery_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _heartbeat_interval(self) -> int:
+        return MANAGED_HEARTBEAT_INTERVAL_SECONDS if self.config.local_proxy.sync_from_lightnow else DEVICE_HEARTBEAT_INTERVAL_SECONDS
+
+    def _schedule_discoveries(self, requests: Any) -> None:
+        if not isinstance(requests, list):
+            return
+        for request in requests[:20]:
+            if len(self._discovery_tasks) >= 2:
+                break
+            if not isinstance(request, dict) or request.get("profile") != self.config.local_proxy.profile:
+                continue
+            try:
+                attempt_id = str(UUID(request["id"]))
+                if request.get("runtime_client_id") != self.registry_client.runtime_client_id:
+                    continue
+                expires = datetime.fromisoformat(request["expires_at"])
+                if expires.tzinfo is None or expires <= datetime.now(UTC) or request.get("status") not in {"queued", "discovering"}:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            if attempt_id not in self._discovery_tasks:
+                task = asyncio.create_task(self._run_discovery(request), name="lightnow-private-discovery")
+                self._discovery_tasks[attempt_id] = task
+                task.add_done_callback(lambda _task, key=attempt_id: self._discovery_tasks.pop(key, None))
+
+    async def _run_discovery(self, request: dict[str, Any]) -> None:
+        """A queue entry selects work, never authority or a substitute request."""
+        if self.registry_client is None:
+            return
+        try:
+            profile = self.config.local_proxy.profile
+            metadata = await self.registry_client.fetch_profile_metadata(profile)
+            assignment = next((item for item in metadata.get("servers", []) if isinstance(item, dict)
+                               and item.get("assignment_id") == request.get("assignment_id")
+                               and item.get("connection_id") == request.get("connection_id")), None)
+            if assignment is None or not isinstance(assignment.get("alias"), str):
+                return
+            resolved = await self.registry_client.fetch_profile_upstream(profile, assignment["alias"], None)
+            managed = resolved.managed
+            if managed is None:
+                return
+            for field in ("connection_id", "connection_revision", "profile_id", "profile_revision", "policy_revision", "profile",
+                          "assignment_id", "assignment_revision", "runtime_client_id", "credential_binding_id", "credential_revision"):
+                value = getattr(managed, field)
+                if isinstance(value, UUID):
+                    value = str(value)
+                if field not in request or value != request[field]:
+                    return
+            if not isinstance(request.get("etag"), str):
+                return
+            expires = datetime.fromisoformat(request["expires_at"])
+            if expires.tzinfo is None or expires <= datetime.now(UTC):
+                return
+            managed.assert_current()
+            started = monotonic()
+            try:
+                async with asyncio.timeout(30):
+                    async with self.upstream_client.session(resolved.config) as client:
+                        inventory = await self.upstream_client.discover_tools(client)
+            except Exception as exc:
+                leaf = unwrap_error(exc)
+                diagnostic = diagnostic_for_exception(leaf)
+                if isinstance(leaf, ToolDiscoveryError):
+                    status, reason = "partial", leaf.reason_code
+                else:
+                    status, reason = {
+                        "configuration": ("configuration_required", "CONFIGURATION_REQUIRED"),
+                        "authentication": ("authentication_required", "AUTHENTICATION_REQUIRED"),
+                        "authorization": ("authentication_required", "AUTHENTICATION_REQUIRED"),
+                        "timeout": ("partial", "DISCOVERY_TIMED_OUT"),
+                        "runtime": ("startup_failed", "RUNTIME_START_FAILED"),
+                    }.get(diagnostic.kind, ("connection_failed", "CONNECTION_FAILED"))
+                await self.registry_client.report_discovery(managed, request["id"], request["etag"], {
+                    "status": status, "reason_code": reason, "page_count": 0,
+                    "duration_ms": min(30000, self._duration_ms(started)),
+                })
+                return
+            await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"])
+        except Exception:
+            # No untrusted tool metadata, URLs, credentials or raw errors in logs.
+            logger.warning("private discovery could not be reported under current authority")
 
     def device_heartbeat_status(self) -> dict[str, Any]:
         """Return non-secret local diagnostics for the last heartbeat attempt."""
         return {
             "enabled": self.device_heartbeat_enabled(),
-            "interval_seconds": DEVICE_HEARTBEAT_INTERVAL_SECONDS,
+            "interval_seconds": self._heartbeat_interval(),
             "last_attempt_at": self.device_heartbeat_last_attempt_at.isoformat()
             if self.device_heartbeat_last_attempt_at
             else None,
