@@ -375,12 +375,15 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             state["available"] = False
             with pytest.raises(httpx.HTTPStatusError):
                 await router.list_tools("default")
+            with pytest.raises(httpx.HTTPStatusError):
+                await router.call_tool("default", f"{TOOL_PREFIX}__read", {"value": "sensitive-value"})
             assert calls() == ["read"]
             await router.flush_managed_events()
             assert router.managed_event_status()["pending"] == 0
             assert {fact["phase"] for fact in facts} >= {"attempted", "denied", "dispatch_started", "dispatched", "succeeded"}
             assert any(fact.get("reason_code") == "TOOL_NOT_SELECTED" for fact in facts)
             assert any(fact["phase"] == "runtime_failed" and fact.get("reason_code") == "EVIDENCE_STORE_UNAVAILABLE" for fact in facts)
+            assert any(fact["phase"] == "runtime_failed" and fact.get("reason_code") == "CONTROL_PLANE_UNAVAILABLE" for fact in facts)
             assert sum(fact["phase"] == "succeeded" for fact in facts) == 1
             assert sum(fact["phase"] == "dispatch_started" for fact in facts) == 1
             assert all(fact["schema_version"] == 2 for fact in facts)

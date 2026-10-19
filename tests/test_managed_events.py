@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 from time import monotonic
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -128,6 +129,7 @@ def test_os_process_exit_recovers_committed_facts_without_dispatch_retry(tmp_pat
 import json, os, sys
 from pathlib import Path
 from time import monotonic
+from uuid import uuid4
 from lightnow_proxy.managed_events import ManagedEventOutbox
 from mcp.types import CallToolResult, TextContent, Tool
 
@@ -242,3 +244,109 @@ async def test_response_transport_loss_and_cancellation_have_distinct_immutable_
     assert facts[-1]["reason_code"] == ("UPSTREAM_FAILED" if failure == "upstream_error" else "UPSTREAM_OUTCOME_UNKNOWN")
     assert "private " not in json.dumps(facts)
     assert "private-upstream" not in json.dumps(facts)
+
+
+def test_report_receipt_survives_business_expiry_without_persisting_execution_context(tmp_path, monkeypatch):
+    box = journal(tmp_path)
+    managed = lease()
+    box.remember(managed, IDENTITY)
+    with sqlite3.connect(box.path) as db:
+        stored = db.execute("SELECT * FROM report_receipts").fetchone()
+    assert managed.reporting_proof in stored
+    assert managed.context_proof not in json.dumps(stored)
+    monkeypatch.setattr("lightnow_proxy.managed_events.time", lambda: managed.expires_at + 60)
+    assert box.begin_cached((IDENTITY[0], IDENTITY[1], "other-actor"), managed.profile, str(managed.assignment_id)) is None
+    assert box.begin_cached(IDENTITY, "other-profile", str(managed.assignment_id)) is None
+    assert box.begin_cached(IDENTITY, managed.profile, str(uuid4())) is None
+    call = box.begin_cached(IDENTITY, managed.profile, str(managed.assignment_id))
+    assert call is not None
+    box.record(call, "runtime_failed", "CONTROL_PLANE_UNAVAILABLE")
+    call.release()
+    facts = box.pending(IDENTITY)
+    assert [event["phase"] for event in facts] == ["attempted", "runtime_failed"]
+    assert all(event["reporting_proof"] == managed.reporting_proof for event in facts)
+    assert all("original_tool_name" not in event and "observation_id" not in event for event in facts)
+    monkeypatch.setattr("lightnow_proxy.managed_events.time", lambda: managed.issued_at + 7 * 86400 + 1)
+    assert box.begin_cached(IDENTITY, managed.profile, str(managed.assignment_id)) is None
+    box.unattributed()
+    assert box.pending(IDENTITY) == []
+    assert journal(tmp_path).status()["unattributed_attempts"] == 1
+    assert journal(tmp_path).status()["pending"] == journal(tmp_path).status()["unresolved"] == 2
+
+
+def test_report_receipt_cache_has_its_own_capacity_without_deleting_queued_facts(tmp_path, monkeypatch):
+    monkeypatch.setattr("lightnow_proxy.managed_events.MAX_REPORT_RECEIPTS", 2)
+    box = journal(tmp_path)
+    receipts = [lease().model_copy(update={"assignment_id": uuid4()}) for _ in range(3)]
+    pending = box.begin(receipts[0], IDENTITY)
+    box.record(pending, "denied", "TOOL_NOT_SELECTED")
+    pending.release()
+    for managed in receipts:
+        box.remember(managed, IDENTITY)
+    with sqlite3.connect(box.path) as db:
+        retained = {row[0] for row in db.execute("SELECT assignment_id FROM report_receipts")}
+    assert retained == {str(receipts[1].assignment_id), str(receipts[2].assignment_id)}
+    assert len(box.pending(IDENTITY)) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_first_lookup_records_a_durable_unattributed_gap_without_inventing_a_scope(tmp_path):
+    router = managed_router(tmp_path)
+    with respx.mock(assert_all_called=True) as api:
+        api.get(REGISTRY + "/integrations/profiles/default/servers").respond(503)
+        with pytest.raises(httpx.HTTPStatusError):
+            await router.call_tool("default", "ln_11111111111141118111111111111111__read", {"secret": "private request"})
+    box = router._event_outbox()
+    assert box.status()["unattributed_attempts"] == 1
+    assert box.status()["pending"] == 0
+    assert ManagedEventOutbox(box.path).status()["unattributed_attempts"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("known", [False, True])
+async def test_unresolved_managed_attempt_never_captures_arguments_or_raw_errors(tmp_path, known):
+    router = managed_router(tmp_path)
+    router.config.local_proxy.telemetry_enabled = True
+    router.config.local_proxy.capture_tool_arguments = True
+    managed = lease()
+    if known:
+        await router._remember_reporter(managed)
+    optional = []
+    def legacy_event(request):
+        optional.append(json.loads(request.content))
+        return httpx.Response(201)
+    with respx.mock(assert_all_called=True) as api:
+        api.get(REGISTRY + "/integrations/profiles/default/servers").respond(503)
+        api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=legacy_event)
+        with pytest.raises(httpx.HTTPStatusError):
+            await router.call_tool("default", managed.tool_namespace + "__read", {"value": "private request"})
+    assert len(optional) == 1
+    assert optional[0].get("arguments") is None and optional[0]["arguments_captured"] is False
+    assert optional[0].get("error_message") is None
+    assert "private request" not in json.dumps(optional)
+    identity = await router.registry_client.managed_report_identity()
+    facts = router._event_outbox().pending(identity)
+    assert len(facts) == (2 if known else 0)
+    if known:
+        assert facts[-1]["phase"] == "runtime_failed" and facts[-1]["reason_code"] == "CONTROL_PLANE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,body,phase,reason", [
+    (403, {"status": 403, "message": "private denial detail"}, "denied", "PROFILE_ACCESS_DENIED"),
+    (503, {"error": {"code": "ORGANIZATION_ACCESS_UNAVAILABLE", "reason": "SOURCE_EXPIRED"}}, "runtime_failed", "SOURCE_EXPIRED"),
+])
+async def test_report_only_receipt_retains_original_context_for_closed_control_plane_decisions(tmp_path, status, body, phase, reason):
+    router = managed_router(tmp_path)
+    managed = lease()
+    await router._remember_reporter(managed)
+    with respx.mock(assert_all_called=True) as api:
+        api.get(REGISTRY + "/integrations/profiles/default/servers").respond(status, json=body)
+        with pytest.raises(httpx.HTTPStatusError):
+            await router.call_tool("default", managed.tool_namespace + "__read", {"value": "private request"})
+    facts = router._event_outbox().pending(await router.registry_client.managed_report_identity())
+    assert [fact["phase"] for fact in facts] == ["attempted", phase]
+    assert facts[-1]["reason_code"] == reason
+    assert all(fact["reporting_proof"] == managed.reporting_proof for fact in facts)
+    assert all("original_tool_name" not in fact for fact in facts)
+    assert "private " not in json.dumps(facts)

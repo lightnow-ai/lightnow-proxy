@@ -227,3 +227,17 @@ are not silently deleted. Queue corruption, missing receipts or exhausted local
 capacity blocks managed dispatch explicitly. The status endpoint exposes only
 counts and closed failure codes. The queue is limited to 2,000 unfinished calls,
 with at most four facts per call, and completed acknowledged calls are removed.
+
+A failed current-context lookup must not erase a managed attempt after a previous
+successful discovery. The private journal may retain only the separate report
+receipt, its delivery deadline and original actor/Registry/profile/assignment
+binding. Store this before external-secret resolution. On lookup failure, record
+an attempted/runtime-failed pair against that original reporting context, with no
+unverified tool name, while preserving the original execution error. This cache
+never supplies a runtime configuration, business lease or use grant. Changed
+accounts/issuers/Registry endpoints cannot borrow another receipt. Without an
+unexpired receipt, increment a durable local unattributed-attempt count instead
+of inventing an owner or reporting a successful call. Required evidence status
+exposes that gap. Receipt storage is separately bounded to 2,000 entries and
+expired receipts can be removed; pending event facts remain subject to their
+existing explicit-resolution policy.

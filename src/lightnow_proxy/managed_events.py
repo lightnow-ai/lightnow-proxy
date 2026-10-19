@@ -17,6 +17,7 @@ from filelock import FileLock, Timeout
 from lightnow_proxy.registry import ManagedRuntime
 
 MAX_PENDING_CALLS = 2000
+MAX_REPORT_RECEIPTS = 2000
 
 
 class EvidenceStoreError(Exception):
@@ -55,6 +56,15 @@ class ManagedEventOutbox:
                         phase TEXT NOT NULL, terminal INTEGER NOT NULL DEFAULT 0,
                         report_until INTEGER NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS report_receipts (
+                        identity TEXT NOT NULL, profile TEXT NOT NULL, assignment_id TEXT NOT NULL,
+                        proof TEXT NOT NULL, report_until INTEGER NOT NULL,
+                        PRIMARY KEY(identity,profile,assignment_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS evidence_gaps (
+                        id INTEGER PRIMARY KEY CHECK(id=1), unattributed_attempts INTEGER NOT NULL
+                    );
+                    INSERT OR IGNORE INTO evidence_gaps VALUES(1,0);
                     CREATE TABLE IF NOT EXISTS events (
                         sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
                         call_id TEXT NOT NULL REFERENCES calls(id), payload TEXT NOT NULL,
@@ -82,9 +92,42 @@ class ManagedEventOutbox:
         except OSError as exc:
             raise EvidenceStoreError() from exc
 
+    def remember(self, managed: ManagedRuntime, identity: tuple[str, str, str]) -> None:
+        if not managed.reporting_proof:
+            raise EvidenceStoreError()
+        try:
+            with closing(self._connect()) as db, db:
+                db.execute("DELETE FROM report_receipts WHERE report_until<=?", (int(time()),))
+                db.execute("INSERT INTO report_receipts VALUES(?,?,?,?,?) ON CONFLICT(identity,profile,assignment_id) "
+                           "DO UPDATE SET proof=excluded.proof,report_until=excluded.report_until",
+                           (json.dumps(identity), managed.profile, str(managed.assignment_id), managed.reporting_proof, managed.issued_at + 7 * 86400))
+                db.execute("DELETE FROM report_receipts WHERE rowid IN "
+                           "(SELECT rowid FROM report_receipts ORDER BY report_until DESC,rowid DESC LIMIT -1 OFFSET ?)", (MAX_REPORT_RECEIPTS,))
+        except (OSError, sqlite3.Error) as exc:
+            raise EvidenceStoreError() from exc
+
+    def begin_cached(self, identity: tuple[str, str, str], profile: str, assignment_id: str) -> ManagedCall | None:
+        try:
+            with closing(self._connect()) as db:
+                row = db.execute("SELECT proof,report_until FROM report_receipts WHERE identity=? AND profile=? AND assignment_id=? AND report_until>?",
+                                 (json.dumps(identity), profile, assignment_id, int(time()))).fetchone()
+            return self._begin(row["proof"], row["report_until"], identity) if row is not None else None
+        except (OSError, sqlite3.Error) as exc:
+            raise EvidenceStoreError() from exc
+
+    def unattributed(self) -> None:
+        try:
+            with closing(self._connect()) as db, db:
+                db.execute("UPDATE evidence_gaps SET unattributed_attempts=unattributed_attempts+1 WHERE id=1")
+        except (OSError, sqlite3.Error) as exc:
+            raise EvidenceStoreError() from exc
+
     def begin(self, managed: ManagedRuntime, identity: tuple[str, str, str]) -> ManagedCall:
         if not managed.reporting_proof:
             raise EvidenceStoreError()
+        return self._begin(managed.reporting_proof, managed.issued_at + 7 * 86400, identity)
+
+    def _begin(self, proof: str, report_until: int, identity: tuple[str, str, str]) -> ManagedCall:
         call_id = str(uuid4())
         lock = self._lock(call_id)
         try:
@@ -93,9 +136,9 @@ class ManagedEventOutbox:
                 db.execute("BEGIN IMMEDIATE")
                 if db.execute("SELECT COUNT(*) FROM calls").fetchone()[0] >= MAX_PENDING_CALLS:
                     raise EvidenceStoreError()
-                base = {"schema_version": 2, "call_id": call_id, "reporting_proof": managed.reporting_proof}
+                base = {"schema_version": 2, "call_id": call_id, "reporting_proof": proof}
                 db.execute("INSERT INTO calls(id,identity,base,phase,report_until) VALUES(?,?,?,?,?)",
-                           (call_id, json.dumps(identity), json.dumps(base), "attempted", managed.issued_at + 7 * 86400))
+                           (call_id, json.dumps(identity), json.dumps(base), "attempted", report_until))
                 self._append(db, call_id, base, "attempted")
             return ManagedCall(call_id, lock)
         except (OSError, sqlite3.Error) as exc:
@@ -199,7 +242,8 @@ class ManagedEventOutbox:
     def status(self) -> dict[str, Any]:
         try:
             with closing(self._connect()) as db:
-                return {"pending": db.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                return {"unattributed_attempts": db.execute("SELECT unattributed_attempts FROM evidence_gaps WHERE id=1").fetchone()[0],
+                        "pending": db.execute("SELECT COUNT(*) FROM events").fetchone()[0],
                         "unresolved": db.execute("SELECT COUNT(*) FROM events WHERE rejection IS NOT NULL").fetchone()[0],
                         "rejections": {row[0]: row[1] for row in db.execute("SELECT rejection,COUNT(*) FROM events WHERE rejection IS NOT NULL GROUP BY rejection")}}
         except (OSError, sqlite3.Error):

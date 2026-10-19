@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 from time import monotonic, time
-from typing import Callable, Literal
+from typing import Awaitable, Callable, Literal
 from uuid import UUID
 from typing import Any
 from urllib.parse import quote
@@ -301,10 +301,12 @@ class RegistryApiClient:
         runtime_secret_resolver: RuntimeSecretResolver | None = None,
         *,
         runtime_files_connection_id: str | None = None,
+        report_receipt_observer: Callable[[ManagedRuntime], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.runtime_secret_resolver = runtime_secret_resolver
         self.runtime_files_connection_id = runtime_files_connection_id
+        self.report_receipt_observer = report_receipt_observer
         self._access_token: str | None = None
         self._tenant_id: str | None = None
         self.runtime_client_id: str | None = None
@@ -493,10 +495,10 @@ class RegistryApiClient:
         managed.assert_current()
         return allowed
 
-    async def managed_report_identity(self) -> tuple[str, str, str]:
+    async def managed_report_identity(self, *, refresh_tokens: bool = True) -> tuple[str, str, str]:
         if not self.config.use_cli_session:
             raise RegistryApiError("MANAGED_REPORT_SESSION_REQUIRED")
-        session = await self._cli_session()
+        session = await self._cli_session(refresh_tokens=refresh_tokens)
         claims = session.token_claims()
         issuer, subject = claims.get("iss"), claims.get("sub")
         if (not isinstance(issuer, str) or issuer.rstrip("/") != session.issuer.rstrip("/")
@@ -594,6 +596,8 @@ class RegistryApiClient:
                     or str(managed.assignment_id) != item.get("assignment_id")):
                 raise RegistryApiError("MANAGED_CONTEXT_MISMATCH")
             managed.assert_current()
+            if self.report_receipt_observer is not None:
+                await self.report_receipt_observer(managed)
             client_config = await self._resolve_profile_client_config(item, client_config)
             managed.assert_current()
             return ResolvedRuntimeUpstream(
@@ -811,12 +815,12 @@ class RegistryApiClient:
             return {}
         return {"Authorization": f"Bearer {token}"}
 
-    async def _cli_session(self) -> "CliSession":
+    async def _cli_session(self, *, refresh_tokens: bool = True) -> "CliSession":
         configured_path = self.config.cli_session_path or self.config.cli_config_path
         path = Path(os.path.expanduser(configured_path))
         session = CliSession.load(path)
         self._validate_cli_session_binding(session)
-        if session.access_token_expired():
+        if refresh_tokens and session.access_token_expired():
             lock = _cli_session_file_lock(path, self.config.timeout_seconds)
             logger.info("waiting for CLI session refresh lock")
             try:

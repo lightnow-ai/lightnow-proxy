@@ -118,6 +118,7 @@ class ToolRouter:
             RegistryApiClient(
                 config.registry_api,
                 RuntimeSecretResolver(config.runtime_secrets),
+                report_receipt_observer=self._remember_reporter,
                 runtime_files_connection_id=(
                     str(config.local_proxy.connection_id)
                     if config.local_proxy.connection_id
@@ -330,8 +331,13 @@ class ToolRouter:
         routed: RoutedTool | None = None
         upstream: ProfileUpstream | None = None
         try:
-            routed, upstream = await self._call_target(profile_name, proxied_tool_name)
+            try:
+                routed, upstream = await self._call_target(profile_name, proxied_tool_name)
+            except BaseException as resolution_error:
+                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, resolution_error)
+                raise
             if upstream is None:
+                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, ToolRoutingError("MANAGED_RUNTIME_NOT_READY"))
                 result = CallToolResult(
                     content=[
                         TextContent(type="text", text=f"Tool {proxied_tool_name!r} is not available in this profile.")
@@ -379,10 +385,10 @@ class ToolRouter:
                     **runtime_request_metadata(
                         arguments,
                         request_meta,
-                        capture_arguments=self.config.local_proxy.capture_tool_arguments and not (upstream and upstream.managed),
+                        capture_arguments=self.config.local_proxy.capture_tool_arguments and not ((upstream and upstream.managed) or reserved_managed_namespace(proxied_tool_name.partition("__")[0])),
                     ),
                     "error_type": error_type_name(exc),
-                    "error_message": error_message(exc),
+                    "error_message": None if reserved_managed_namespace(proxied_tool_name.partition("__")[0]) else error_message(exc),
                 }
             )
             leaf = unwrap_error(exc)
@@ -408,11 +414,56 @@ class ToolRouter:
             self._managed_outbox = ManagedEventOutbox(Path(session_path).expanduser().parent / "managed-runtime" / "events.sqlite3")
         return self._managed_outbox
 
+    async def _remember_reporter(self, managed: ManagedRuntime) -> None:
+        if self.registry_client is None:
+            raise EvidenceStoreError()
+        identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
+        self._event_outbox().remember(managed, identity)
+
+    async def _record_unresolved_managed_attempt(self, profile: str, wire_name: str, error: BaseException) -> None:
+        namespace = wire_name.partition("__")[0]
+        if not self.managed_events_enabled() or not reserved_managed_namespace(namespace) or self.registry_client is None:
+            return
+        outbox = self._event_outbox()
+        try:
+            identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
+        except RegistryApiError:
+            outbox.unattributed()
+            return
+        call = outbox.begin_cached(identity, profile, str(UUID(hex=namespace[3:])))
+        if call is None:
+            outbox.unattributed()
+            return
+        try:
+            leaf = unwrap_error(error)
+            phase = "runtime_failed"
+            code = "CONTROL_PLANE_UNAVAILABLE" if isinstance(leaf, httpx.HTTPError) else (
+                "MANAGED_CONTEXT_MISMATCH" if str(leaf) == "MANAGED_CONTEXT_MISMATCH" else "MANAGED_RUNTIME_NOT_READY")
+            if isinstance(leaf, RegistryApiError) and str(leaf) == "MANAGED_AUTHORITY_EXPIRED":
+                phase, code = "denied", "MANAGED_AUTHORITY_EXPIRED"
+            if isinstance(leaf, httpx.HTTPStatusError):
+                try:
+                    body = leaf.response.json()
+                except ValueError:
+                    body = None
+                detail = body.get("error") if isinstance(body, dict) else None
+                if (leaf.response.status_code == 403 and isinstance(body, dict)
+                        and (body.get("status") == 403 or isinstance(detail, dict) and detail.get("code") == "FORBIDDEN")):
+                    phase, code = "denied", "PROFILE_ACCESS_DENIED"
+                elif (leaf.response.status_code == 503 and isinstance(detail, dict)
+                        and detail.get("code") == "ORGANIZATION_ACCESS_UNAVAILABLE" and isinstance(detail.get("reason"), str) and detail.get("reason") in {
+                            "SOURCE_EXPIRED", "SOURCE_UNREACHABLE", "SOURCE_INVALID", "SOURCE_MISSING", "SOURCE_ROLLBACK", "SOURCE_RETIRED",
+                        }):
+                    code = detail["reason"]
+            outbox.record(call, phase, code)
+        finally:
+            call.release()
+
     async def _call_managed_tool(self, upstream: ProfileUpstream, tool_name: str, arguments: dict[str, Any]) -> CallToolResult:
         managed = upstream.managed
         if self.registry_client is None or managed is None:
             raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
-        identity = await self.registry_client.managed_report_identity()
+        identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
         outbox = self._event_outbox()
         call = outbox.begin(managed, identity)
         try:
@@ -764,7 +815,7 @@ class ToolRouter:
                 **runtime_request_metadata(
                     arguments,
                     request_meta,
-                    capture_arguments=self.config.local_proxy.capture_tool_arguments and not (upstream and upstream.managed),
+                    capture_arguments=self.config.local_proxy.capture_tool_arguments and not ((upstream and upstream.managed) or reserved_managed_namespace(proxied_tool_name.partition("__")[0])),
                 ),
                 "upstream_transport": upstream.config.transport if upstream else None,
                 "response_items_count": len(result.content),
