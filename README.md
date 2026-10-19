@@ -46,6 +46,15 @@ their parameter-header schemas from that same fully discovered client.
 The managed dispatch primitive authorizes that inventory before sending once;
 schema-mismatch recovery and interactive retries must return to its policy gate.
 
+When Registry API requests an optional sanitized setup preview, the Proxy projects
+only public input IDs, binding booleans, typed placeholders and explicitly allowed
+public choice indexes from the native managed context. It does not parse launch
+commands or copy configuration values, files, endpoints or tool metadata into the
+preview. Unsupported or mismatched descriptors produce an unavailable preview
+without failing successful private discovery. Sharing remains a separate explicit
+API/UI action; this Proxy does not create or publish contributions. The full
+workflow is specified in [Registry API #1340](https://github.com/lightnow-ai/registry-api/pull/1340).
+
 For managed connections the existing device heartbeat declares
 `managed-connections.v1` and obtains the actor-owned runtime client ID, even when
 optional activity capture is disabled.
