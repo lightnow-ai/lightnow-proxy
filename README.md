@@ -38,6 +38,14 @@ The proxy supports the official MCP `2026-07-28` revision with stateless,
 per-request protocol metadata and `server/discover`. It keeps automatic
 compatibility with handshake-era servers and clients through `2025-11-25`.
 
+Tool discovery reads complete pagination from the actual configured upstream.
+It fails explicitly on repeated cursors, duplicate exact names or limits of
+30 seconds, 100 pages, 2,000 tools and 4 MiB of definitions. A complete empty
+inventory stays distinct from incomplete discovery. Modern HTTP calls prepare
+their parameter-header schemas from that same fully discovered client.
+The managed dispatch primitive authorizes that inventory before sending once;
+schema-mismatch recovery and interactive retries must return to its policy gate.
+
 ## Install
 
 Requirements:
