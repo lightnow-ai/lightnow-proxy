@@ -77,6 +77,8 @@ class ManagedEventOutbox:
             lock = FileLock(self.path.parent / f"{call_id}.lock", timeout=0, thread_local=False, mode=0o600)
             lock.acquire()
             return lock
+        except Timeout:
+            raise
         except OSError as exc:
             raise EvidenceStoreError() from exc
 
