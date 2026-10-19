@@ -32,6 +32,7 @@ class ManagedCall:
     started: float = field(default_factory=monotonic)
     observation_id: str | None = None
     original_tool_name: str | None = None
+    reporting_proof: str | None = field(default=None, repr=False)
     handoff: bool = False
 
     def release(self) -> None:
@@ -173,6 +174,8 @@ class ManagedEventOutbox:
                 if row is None or row["terminal"]:
                     raise EvidenceStoreError()
                 base = json.loads(row["base"])
+                if call.reporting_proof:
+                    base["reporting_proof"] = call.reporting_proof
                 if call.observation_id and call.original_tool_name:
                     base.update(observation_id=call.observation_id, original_tool_name=call.original_tool_name)
                 db.execute("UPDATE calls SET base=? WHERE id=?", (json.dumps(base), call.id))

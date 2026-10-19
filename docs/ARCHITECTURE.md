@@ -195,6 +195,14 @@ requiring `/team-b/admin` or plain `admin`.
 
 ## Required managed call evidence
 
+For an exact business-tool discovery, send the original report-only receipt to
+the existing discovery resource. A returned name-bound receipt replaces it only
+for subsequent call phases, preserving the original lifetime and context.
+Previously queued facts retain their IDs and content. The private call journal
+persists the bound receipt before dispatch, including for crash recovery, so
+late named evidence can be verified after the runtime observation is removed.
+This receipt cannot authorize execution or renew the original authority.
+
 After complete discovery and validation of the current tool authorization, the
 runtime queues the exact observation and its original short-lived context proof
 on the existing device heartbeat. This includes an applied empty/denied policy.

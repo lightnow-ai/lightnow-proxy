@@ -482,8 +482,11 @@ class ToolRouter:
                     if any(tool.name == tool_name for tool in inventory.tools):
                         call.original_tool_name = tool_name
 
+                def reported(proof: str) -> None:
+                    call.reporting_proof = proof
+
                 try:
-                    await self.registry_client.authorize_inventory(managed, inventory, tool_name, observed=observed)
+                    await self.registry_client.authorize_inventory(managed, inventory, tool_name, observed=observed, reported=reported)
                 except ManagedToolDenied:
                     if call.observation_id:
                         self._queue_managed_application(managed, call.observation_id)

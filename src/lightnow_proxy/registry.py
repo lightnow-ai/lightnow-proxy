@@ -430,7 +430,7 @@ class RegistryApiClient:
 
     async def authorize_inventory(
         self, managed: ManagedRuntime, inventory: ToolInventory, original_tool_name: str | None = None,
-        *, observed: Callable[[str], None] | None = None,
+        *, observed: Callable[[str], None] | None = None, reported: Callable[[str], None] | None = None,
     ) -> set[str]:
         managed.assert_current()
         headers = await self._authorization_headers()
@@ -447,7 +447,7 @@ class RegistryApiClient:
                 etag = response.headers["ETag"]
             except (KeyError, TypeError, ValueError):
                 raise RegistryApiError("INVALID_DISCOVERY_RESPONSE") from None
-        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name, observed=observed)
+        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name, observed=observed, reported=reported)
 
     async def report_discovery(
         self, managed: ManagedRuntime, attempt_id: str, etag: str, report: dict[str, Any],
@@ -467,11 +467,14 @@ class RegistryApiClient:
     async def report_inventory(
         self, managed: ManagedRuntime, inventory: ToolInventory, attempt_id: str, etag: str,
         original_tool_name: str | None = None, *, observed: Callable[[str], None] | None = None,
+        reported: Callable[[str], None] | None = None,
     ) -> set[str]:
         report = {"status": "complete", "page_count": inventory.page_count, "duration_ms": inventory.duration_ms,
                   "tools": [tool.model_dump(by_alias=True, mode="json", exclude_none=True) for tool in inventory.tools]}
         if original_tool_name is not None:
             report["original_tool_name"] = original_tool_name
+            if managed.reporting_proof is not None:
+                report["reporting_proof"] = managed.reporting_proof
         authorization = (await self.report_discovery(managed, attempt_id, etag, report)).get("authorization")
         if (not isinstance(authorization, dict) or authorization.get("schema_version") != 1
                 or type(authorization.get("expires_at")) is not int or authorization["expires_at"] != managed.expires_at
@@ -487,11 +490,18 @@ class RegistryApiClient:
             decision = authorization.get("requested_tool")
             if not isinstance(decision, dict) or decision.get("name") != original_tool_name:
                 raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+            proof = authorization.get("reporting_proof")
+            if proof is not None and (not isinstance(proof, str) or not proof or len(proof) > 16384):
+                raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
             if decision.get("allowed") is not True or original_tool_name not in allowed:
                 reason = decision.get("reason_code")
                 if not isinstance(reason, str) or reason not in MANAGED_DENIAL_REASONS:
                     raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+                if proof is not None and reported is not None:
+                    reported(proof)
                 raise ManagedToolDenied(reason)
+            if proof is not None and reported is not None:
+                reported(proof)
         managed.assert_current()
         return allowed
 

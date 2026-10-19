@@ -229,6 +229,7 @@ async def test_response_transport_loss_and_cancellation_have_distinct_immutable_
         api.put(base + "/" + DISCOVERY).respond(200, json={"authorization": {
             "schema_version": 1, "expires_at": managed.expires_at, "allowed_tools": ["read"],
             "requested_tool": {"name": "read", "allowed": True, "reason_code": None},
+            "reporting_proof": "bound-original-lifetime-receipt",
         }})
         upstream = ProfileUpstream(config=UpstreamConfig(url="https://private-upstream.test/mcp"), managed=managed)
         if failure == "upstream_error":
@@ -240,6 +241,8 @@ async def test_response_transport_loss_and_cancellation_have_distinct_immutable_
     identity = await router.registry_client.managed_report_identity()
     facts = router._event_outbox().pending(identity)
     assert dispatches == 1
+    assert facts[0]["reporting_proof"] == managed.reporting_proof
+    assert all(fact["reporting_proof"] == "bound-original-lifetime-receipt" for fact in facts[1:])
     assert [fact["phase"] for fact in facts] == ["attempted", "dispatch_started"] + (["dispatched"] if failure == "upstream_error" else []) + [phase]
     assert facts[-1]["reason_code"] == ("UPSTREAM_FAILED" if failure == "upstream_error" else "UPSTREAM_OUTCOME_UNKNOWN")
     assert "private " not in json.dumps(facts)
@@ -398,3 +401,18 @@ async def test_removed_assignment_is_denied_using_its_original_report_receipt(tm
     assert facts[-1]["reason_code"] == "ASSIGNMENT_UNAVAILABLE"
     assert all(fact["reporting_proof"] == managed.reporting_proof for fact in facts)
     assert box.status()["unattributed_attempts"] == 0
+
+
+def test_bound_name_receipt_survives_recovery_without_mutating_prior_fact(tmp_path):
+    box = journal(tmp_path)
+    call = box.begin(lease(), IDENTITY)
+    original = box.pending(IDENTITY)[0]
+    call.observation_id = DISCOVERY
+    call.original_tool_name = "read"
+    call.reporting_proof = "bound-name-receipt"
+    box.record(call, "dispatch_started")
+    call.release()
+    facts = journal(tmp_path).pending(IDENTITY)
+    assert facts[0] == original
+    assert [item["phase"] for item in facts] == ["attempted", "dispatch_started", "outcome_unknown"]
+    assert all(item["reporting_proof"] == "bound-name-receipt" and item["observation_id"] == DISCOVERY for item in facts[1:])
