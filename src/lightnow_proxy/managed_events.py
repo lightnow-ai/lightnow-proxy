@@ -40,8 +40,9 @@ class ManagedCall:
 
 
 class ManagedEventOutbox:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, runtime_key: str = ""):
         self.path = path
+        self.runtime_key = runtime_key
         try:
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if path.parent.is_symlink() or path.is_symlink():
@@ -58,9 +59,9 @@ class ManagedEventOutbox:
                         report_until INTEGER NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS report_receipts (
-                        identity TEXT NOT NULL, profile TEXT NOT NULL, assignment_id TEXT NOT NULL,
+                        identity TEXT NOT NULL, runtime_key TEXT NOT NULL, profile TEXT NOT NULL, assignment_id TEXT NOT NULL,
                         proof TEXT NOT NULL, report_until INTEGER NOT NULL,
-                        PRIMARY KEY(identity,profile,assignment_id)
+                        PRIMARY KEY(identity,runtime_key,profile,assignment_id)
                     );
                     CREATE TABLE IF NOT EXISTS evidence_gaps (
                         id INTEGER PRIMARY KEY CHECK(id=1), unattributed_attempts INTEGER NOT NULL
@@ -72,6 +73,16 @@ class ManagedEventOutbox:
                         rejection TEXT
                     );
                 """)
+                db.execute("BEGIN IMMEDIATE")
+                if "runtime_key" not in {row["name"] for row in db.execute("PRAGMA table_info(report_receipts)")}:
+                    # Keep historical facts and old cache entries intact. An
+                    # unbound old cache entry cannot represent a configured client.
+                    db.execute("ALTER TABLE report_receipts RENAME TO report_receipts_unscoped")
+                    db.execute("CREATE TABLE report_receipts (identity TEXT NOT NULL,runtime_key TEXT NOT NULL,"
+                               "profile TEXT NOT NULL,assignment_id TEXT NOT NULL,proof TEXT NOT NULL,report_until INTEGER NOT NULL,"
+                               "PRIMARY KEY(identity,runtime_key,profile,assignment_id))")
+                    db.execute("INSERT INTO report_receipts SELECT identity,'',profile,assignment_id,proof,report_until FROM report_receipts_unscoped")
+                    db.execute("DROP TABLE report_receipts_unscoped")
         except (OSError, sqlite3.Error) as exc:
             raise EvidenceStoreError() from exc
 
@@ -99,9 +110,9 @@ class ManagedEventOutbox:
         try:
             with closing(self._connect()) as db, db:
                 db.execute("DELETE FROM report_receipts WHERE report_until<=?", (int(time()),))
-                db.execute("INSERT INTO report_receipts VALUES(?,?,?,?,?) ON CONFLICT(identity,profile,assignment_id) "
+                db.execute("INSERT INTO report_receipts VALUES(?,?,?,?,?,?) ON CONFLICT(identity,runtime_key,profile,assignment_id) "
                            "DO UPDATE SET proof=excluded.proof,report_until=excluded.report_until",
-                           (json.dumps(identity), managed.profile, str(managed.assignment_id), managed.reporting_proof, managed.issued_at + 7 * 86400))
+                           (json.dumps(identity), self.runtime_key, managed.profile, str(managed.assignment_id), managed.reporting_proof, managed.issued_at + 7 * 86400))
                 db.execute("DELETE FROM report_receipts WHERE rowid IN "
                            "(SELECT rowid FROM report_receipts ORDER BY report_until DESC,rowid DESC LIMIT -1 OFFSET ?)", (MAX_REPORT_RECEIPTS,))
         except (OSError, sqlite3.Error) as exc:
@@ -110,8 +121,8 @@ class ManagedEventOutbox:
     def begin_cached(self, identity: tuple[str, str, str], profile: str, assignment_id: str, *, reserved: bool = False) -> ManagedCall | None:
         try:
             with closing(self._connect()) as db:
-                row = db.execute("SELECT proof,report_until FROM report_receipts WHERE identity=? AND profile=? AND assignment_id=? AND report_until>?",
-                                 (json.dumps(identity), profile, assignment_id, int(time()))).fetchone()
+                row = db.execute("SELECT proof,report_until FROM report_receipts WHERE identity=? AND runtime_key=? AND profile=? AND assignment_id=? AND report_until>?",
+                                 (json.dumps(identity), self.runtime_key, profile, assignment_id, int(time()))).fetchone()
             return self._begin(row["proof"], row["report_until"], identity, reserved=reserved) if row is not None else None
         except (OSError, sqlite3.Error) as exc:
             raise EvidenceStoreError() from exc

@@ -416,3 +416,39 @@ def test_bound_name_receipt_survives_recovery_without_mutating_prior_fact(tmp_pa
     assert facts[0] == original
     assert [item["phase"] for item in facts] == ["attempted", "dispatch_started", "outcome_unknown"]
     assert all(item["reporting_proof"] == "bound-name-receipt" and item["observation_id"] == DISCOVERY for item in facts[1:])
+
+
+def test_shared_actor_journal_cannot_relabel_one_clients_cached_failure_as_another(tmp_path):
+    first = managed_router(tmp_path)
+    second = managed_router(tmp_path)
+    installation = uuid4()
+    first.config.local_proxy.device_installation_id = second.config.local_proxy.device_installation_id = installation
+    first.config.local_proxy.client_instance_id = uuid4()
+    second.config.local_proxy.client_instance_id = uuid4()
+    original = lease()
+    other = original.model_copy(update={"runtime_client_id": uuid4(), "reporting_proof": "second-client-original-receipt"})
+    box_a, box_b = first._event_outbox(), second._event_outbox()
+    assert box_a.path == box_b.path
+    box_a.remember(original, IDENTITY)
+    assert box_b.begin_cached(IDENTITY, original.profile, str(original.assignment_id)) is None
+    box_b.remember(other, IDENTITY)
+    for box, managed in [(box_a, original), (box_b, other)]:
+        call = box.begin_cached(IDENTITY, managed.profile, str(managed.assignment_id))
+        assert call is not None
+        box.record(call, "runtime_failed", "CONTROL_PLANE_UNAVAILABLE")
+        call.release()
+        assert next(fact for fact in box.pending(IDENTITY) if fact["call_id"] == call.id)["reporting_proof"] == managed.reporting_proof
+
+
+def test_receipt_cache_migration_retains_unbound_receipts_without_assigning_them_to_a_client(tmp_path):
+    path = tmp_path / "events.sqlite3"
+    managed = lease()
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE report_receipts(identity TEXT,profile TEXT,assignment_id TEXT,proof TEXT,report_until INTEGER,PRIMARY KEY(identity,profile,assignment_id))")
+        db.execute("INSERT INTO report_receipts VALUES(?,?,?,?,?)", (json.dumps(IDENTITY), managed.profile, str(managed.assignment_id), managed.reporting_proof, managed.issued_at + 7 * 86400))
+    box = ManagedEventOutbox(path, runtime_key="owned-client")
+    assert box.begin_cached(IDENTITY, managed.profile, str(managed.assignment_id)) is None
+    box.remember(managed, IDENTITY)
+    with sqlite3.connect(path) as db:
+        assert {row[0] for row in db.execute("SELECT runtime_key FROM report_receipts")} == {"", "owned-client"}
+    assert box.status()["pending"] == 0

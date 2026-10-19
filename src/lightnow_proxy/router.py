@@ -420,7 +420,11 @@ class ToolRouter:
             if self.config.registry_api is None:
                 raise EvidenceStoreError()
             session_path = self.config.registry_api.cli_session_path or self.config.registry_api.cli_config_path
-            self._managed_outbox = ManagedEventOutbox(Path(session_path).expanduser().parent / "managed-runtime" / "events.sqlite3")
+            local = self.config.local_proxy
+            runtime_key = (f"{local.device_installation_id}:{local.client_instance_id}"
+                           if local.device_installation_id and local.client_instance_id else
+                           f"runtime:{self.registry_client.runtime_client_id}" if self.registry_client and self.registry_client.runtime_client_id else "unregistered")
+            self._managed_outbox = ManagedEventOutbox(Path(session_path).expanduser().parent / "managed-runtime" / "events.sqlite3", runtime_key=runtime_key)
         return self._managed_outbox
 
     async def _remember_reporter(self, managed: ManagedRuntime) -> None:

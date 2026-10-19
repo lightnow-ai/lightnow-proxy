@@ -269,3 +269,10 @@ leaves a visible unattributed gap. Completed attribution consumes exactly its
 own reservation; missing receipts and failed journal commits retain the gap.
 A currently missing assignment in a successfully fetched profile is an explicit
 assignment denial, distinct from an unavailable control plane.
+
+Multiple managed clients can share one CLI session and durable journal. Receipt
+cache keys additionally bind the native installation/client-instance coordinate;
+a control-plane outage on one client cannot borrow another client's receipt.
+The atomic SQLite cache migration retains old unbound receipts separately until
+expiry and preserves every queued fact. Missing own-client attribution remains
+an explicit gap. Neither cache lookup nor migration creates execution authority.
