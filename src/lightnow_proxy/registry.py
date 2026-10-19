@@ -187,6 +187,14 @@ class CliSession:
 MANAGED_CAPABILITY = "managed-connections.v1"
 
 
+def managed_tool_namespace(assignment_id: str | UUID) -> str:
+    try:
+        identity = assignment_id if isinstance(assignment_id, UUID) else UUID(assignment_id)
+    except (ValueError, TypeError, AttributeError):
+        raise RegistryApiError("INVALID_MANAGED_CONTEXT") from None
+    return f"ln_{identity.hex}"
+
+
 class ManagedRuntime(BaseModel):
     """One response-bound bootstrap lease; never a cached bearer grant."""
 
@@ -216,6 +224,10 @@ class ManagedRuntime(BaseModel):
     expires_at: StrictInt
     context_proof: str = Field(repr=False, min_length=1)
     deadline: float = Field(repr=False, exclude=True)
+
+    @property
+    def tool_namespace(self) -> str:
+        return managed_tool_namespace(self.assignment_id)
 
     def assert_current(self) -> None:
         if (self.expires_at <= self.issued_at or self.expires_at > self.issued_at + 60

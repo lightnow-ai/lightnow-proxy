@@ -58,6 +58,12 @@ apply; reporting does not renew the lease. Managed contexts do not authorize
 resource methods. Synchronized profiles bypass persistent tool caches and stale
 fallbacks. Canonical aliases take precedence; required organization admission also
 excludes local static and legacy runtime overrides from the managed profile.
+Managed wire names use `ln_<full assignment UUID hex>__<original tool name>`.
+Descriptions and metadata retain readable aliases. Aliases containing underscores,
+renames, and replacement assignments therefore cannot transfer tool identity.
+The reserved UUID namespace cannot fall back to static/legacy routing after an
+assignment is removed; ordinary legacy tool names retain their existing form.
+
 
 
 ## Install

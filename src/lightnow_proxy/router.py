@@ -18,7 +18,7 @@ from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemp
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
-from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient, RegistryApiError
+from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient, RegistryApiError, managed_tool_namespace
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
 from lightnow_proxy.upstream import ToolInventory, UpstreamMCPClient
@@ -171,7 +171,7 @@ class ToolRouter:
                     logger.warning("failed to list tools for upstream %s: %s", upstream_name, unwrap_error(exc))
                     continue
                 for tool in upstream_tools:
-                    tools.append(prefix_tool(upstream_name, tool))
+                    tools.append(prefix_tool(upstream_name, tool, managed=upstreams[upstream_name].managed))
             tools.sort(key=lambda item: item.name)
             await self._emit_runtime_event(
                 {
@@ -562,19 +562,41 @@ class ToolRouter:
             servers = payload.get("servers")
             if not isinstance(servers, list):
                 raise ToolRoutingError("INVALID_MANAGED_PROFILE")
-            names = {item["alias"] for item in servers if isinstance(item, dict) and isinstance(item.get("alias"), str)
-                     and RegistryApiClient._profile_server_enabled(item)}
+            names: dict[str, str] = {}
+            managed_names: set[str] = set()
+            managed_aliases: set[str] = set()
+            for item in servers:
+                if not isinstance(item, dict) or not isinstance(item.get("alias"), str) or not RegistryApiClient._profile_server_enabled(item):
+                    continue
+                alias = item["alias"]
+                if "connection_id" in item:
+                    namespace = managed_tool_namespace(item.get("assignment_id"))
+                    managed_names.add(namespace)
+                    managed_aliases.add(alias)
+                else:
+                    namespace = alias
+                    if reserved_managed_namespace(namespace):
+                        raise ToolRoutingError("RESERVED_MANAGED_TOOL_NAMESPACE")
+                if namespace in names:
+                    raise ToolRoutingError("DUPLICATE_PROFILE_TOOL_NAMESPACE")
+                names[namespace] = alias
             required = RegistryApiClient._admission_required(payload)
             routable = {name: None for name in names}
             if not required:
-                routable.update(self.config.upstreams)
-                routable.update({item.name: None for item in profile.runtime_upstreams})
+                routable.update({name: None for name in self.config.upstreams
+                                 if name not in managed_aliases and not reserved_managed_namespace(name)})
+                routable.update({item.name: None for item in profile.runtime_upstreams
+                                 if item.name not in managed_aliases and not reserved_managed_namespace(item.name)})
+            # Reserved UUID namespaces never fall back to a different instance,
+            # including local overrides after detachment or alias reuse.
+            if reserved_managed_namespace(proxied_tool_name):
+                routable = {name: None for name in managed_names}
             routed = self.route_tool(proxied_tool_name, routable)
-            # Canonical assignments win over a local alias collision, including
-            # before organization admission becomes mandatory.
             if routed.upstream_name in names:
-                resolved = await self.registry_client.fetch_profile_upstream(profile_name, routed.upstream_name, get_current_principal())
-                return routed, ProfileUpstream(config=resolved.config, server_name=resolved.server_name, managed=resolved.managed)
+                resolved = await self.registry_client.fetch_profile_upstream(profile_name, names[routed.upstream_name], get_current_principal())
+                if routed.upstream_name in managed_names and (resolved.managed is None or resolved.managed.tool_namespace != routed.upstream_name):
+                    raise ToolRoutingError("MANAGED_CONTEXT_MISMATCH")
+                return RoutedTool(resolved.name, routed.original_name), ProfileUpstream(config=resolved.config, server_name=resolved.server_name, managed=resolved.managed)
             if required:
                 return routed, None
         else:
@@ -611,6 +633,11 @@ class ToolRouter:
                          for item in resolved_profile.upstreams}
             if resolved_profile.admission_required:
                 return canonical
+        if self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow and (
+            any(reserved_managed_namespace(name) for name in profile.upstreams)
+            or any(reserved_managed_namespace(item.name) for item in profile.runtime_upstreams)
+        ):
+            raise ToolRoutingError("RESERVED_MANAGED_TOOL_NAMESPACE")
         upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
         for runtime_upstream in profile.runtime_upstreams:
             if runtime_upstream.name in canonical:
@@ -800,15 +827,23 @@ class ToolRouter:
         return "; ".join(f"{name}: {error_type_name(exc)}" for name, exc in failures)[:500]
 
 
-def prefix_tool(upstream_name: str, tool: Tool) -> Tool:
+def reserved_managed_namespace(value: str) -> bool:
+    return re.fullmatch(r"ln_[0-9a-f]{32}", value.partition("__")[0]) is not None
+
+
+def prefix_tool(upstream_name: str, tool: Tool, *, managed: ManagedRuntime | None = None) -> Tool:
     data = tool.model_dump(exclude_none=True, by_alias=True)
     data = copy.deepcopy(data)
-    data["name"] = f"{upstream_name}__{tool.name}"
+    namespace = managed.tool_namespace if managed is not None else upstream_name
+    data["name"] = f"{namespace}__{tool.name}"
     description = data.get("description") or ""
     data["description"] = f"[{upstream_name}] {description}".strip()
     meta = dict(data.get("_meta") or {})
     meta["lightnow_proxy_upstream"] = upstream_name
     meta["lightnow_proxy_original_name"] = tool.name
+    if managed is not None:
+        meta["lightnow_proxy_connection_id"] = str(managed.connection_id)
+        meta["lightnow_proxy_assignment_id"] = str(managed.assignment_id)
     data["_meta"] = meta
     return Tool.model_validate(data)
 

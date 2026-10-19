@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import json
+import re
 from pathlib import Path
 import sys
 from time import monotonic, time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import httpx2
@@ -29,6 +30,7 @@ CLIENT = str(uuid4())
 CONNECTION = str(uuid4())
 ASSIGNMENT = str(uuid4())
 DISCOVERY = str(uuid4())
+TOOL_PREFIX = f"ln_{UUID(ASSIGNMENT).hex}"
 
 
 def managed_context() -> dict:
@@ -45,7 +47,7 @@ def managed_context() -> dict:
 
 
 @asynccontextmanager
-async def managed_upstream(transport: str, tmp_path: Path):
+async def managed_upstream(transport: str, tmp_path: Path, *, read_name: str = "read"):
     if transport == "stdio":
         trace = tmp_path / "dispatches.txt"
         server = tmp_path / "server.py"
@@ -69,7 +71,7 @@ mcp.run(transport="stdio")
     calls = []
 
     async def list_tools(_context, params):
-        return ListToolsResult(tools=[Tool(name="read" if params.cursor is None else "write", input_schema={
+        return ListToolsResult(tools=[Tool(name=read_name if params.cursor is None else "write", input_schema={
             "type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"],
         })], next_cursor="page-2" if params.cursor is None else None, ttl_ms=0, cache_scope="private")
 
@@ -106,7 +108,7 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
         reports = []
         expired = False
         # This obsolete cache must never revive a hidden tool.
-        (tmp_path / "tools.json").write_text(json.dumps({"generated_at": time(), "tools": [Tool(name="docs__write", input_schema={}).model_dump(by_alias=True)]}))
+        (tmp_path / "tools.json").write_text(json.dumps({"generated_at": time(), "tools": [Tool(name=f"{TOOL_PREFIX}__write", input_schema={}).model_dump(by_alias=True)]}))
 
         def profile_response(request):
             if not state["available"]:
@@ -141,9 +143,9 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             base = REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries"
             api.post(base).respond(201, json={"data": {"id": DISCOVERY}}, headers={"ETag": '"attempt:1"'})
             api.put(base + "/" + DISCOVERY).mock(side_effect=report_response)
-            assert [tool.name for tool in await router.list_tools("default")] == ["docs__read"]
+            assert [tool.name for tool in await router.list_tools("default")] == [f"{TOOL_PREFIX}__read"]
             with pytest.raises(Exception) as denied:
-                await router.call_tool("default", "docs__write", {"value": "sensitive-value"})
+                await router.call_tool("default", f"{TOOL_PREFIX}__write", {"value": "sensitive-value"})
             assert str(unwrap_error(denied.value)) == "MANAGED_TOOL_DENIED"
             assert calls() == []
             # Exercise the actual downstream MCP transport as well as the router.
@@ -151,11 +153,11 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             async with app.router.lifespan_context(app):
                 async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1:8080") as http:
                     async with Client(streamable_http_client("http://127.0.0.1:8080/mcp", http_client=http)) as downstream:
-                        denied_result = await downstream.session.call_tool("docs__write", arguments={"value": "sensitive-value"})
+                        denied_result = await downstream.session.call_tool(f"{TOOL_PREFIX}__write", arguments={"value": "sensitive-value"})
                         assert denied_result.is_error is True
                         assert "MANAGED_TOOL_DENIED" in denied_result.content[0].text
             assert calls() == []
-            result = await router.call_tool("default", "docs__read", {"value": "ok"})
+            result = await router.call_tool("default", f"{TOOL_PREFIX}__read", {"value": "ok"})
             assert result.is_error is False
             assert calls() == ["read"]
             expired = True
@@ -163,13 +165,13 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
                 # Scope the changed clock to this response/dispatch attempt.
                 monkeypatch = clocks
                 with pytest.raises(Exception) as expiry:
-                    await router.call_tool("default", "docs__read", {"value": "sensitive-value"})
+                    await router.call_tool("default", f"{TOOL_PREFIX}__read", {"value": "sensitive-value"})
                 assert str(unwrap_error(expiry.value)) == "MANAGED_AUTHORITY_EXPIRED"
             expired = False
             assert calls() == ["read"]
             state["allow"] = False
             with pytest.raises(Exception):
-                await router.call_tool("default", "docs__read", {"value": "sensitive-value"})
+                await router.call_tool("default", f"{TOOL_PREFIX}__read", {"value": "sensitive-value"})
             assert calls() == ["read"]
             for bypass in ["bypass__read", "legacy-bypass__read"]:
                 with pytest.raises(Exception):
@@ -234,3 +236,89 @@ async def test_runtime_rejects_invalid_authorization_response_without_broadening
         api.put(base + "/" + DISCOVERY).respond(200, json={"authorization": authorization})
         with pytest.raises(RegistryApiError, match="INVALID_TOOL_AUTHORIZATION"):
             await router.registry_client.authorize_inventory(lease, ToolInventory([Tool(name="read", input_schema={})], 1, 1), "read")
+
+
+@pytest.mark.asyncio
+async def test_managed_names_stay_bound_to_assignment_through_alias_collision_rename_and_replacement(tmp_path):
+    other = str(uuid4())
+    other_connection = str(uuid4())
+    async with managed_upstream("http", tmp_path, read_name="_read") as (first_config, first_calls):
+        async with managed_upstream("http", tmp_path) as (second_config, second_calls):
+            router = managed_router(tmp_path)
+            router.registry_client.runtime_client_id = CLIENT
+            # Both had the same old alias-based wire name: docs___read.
+            records = {
+                ASSIGNMENT: {"alias": "docs", "connection_id": CONNECTION, "config": first_config, "tool": "_read"},
+                other: {"alias": "docs_", "connection_id": other_connection, "config": second_config, "tool": "read"},
+            }
+            allowed = {ASSIGNMENT}
+            contexts = {}
+            required = True
+            pending_replacement = None
+
+            def profile_response(request):
+                nonlocal pending_replacement
+                if request.url.params.get("include") == "secrets" and pending_replacement is not None:
+                    records[pending_replacement] = records.pop(ASSIGNMENT)
+                    allowed.remove(ASSIGNMENT)
+                    allowed.add(pending_replacement)
+                    pending_replacement = None
+                items = []
+                for assignment, record in records.items():
+                    if request.url.params.get("alias") not in (None, record["alias"]):
+                        continue
+                    item = {"alias": record["alias"], "connection_id": record["connection_id"], "assignment_id": assignment,
+                            "status": "managed_runtime_required"}
+                    if request.url.params.get("include") == "secrets":
+                        context = {**managed_context(), "assignment_id": assignment, "connection_id": record["connection_id"], "admission_required": required}
+                        contexts[assignment] = context
+                        item.update(status="linked", managed=context, client_config=record["config"])
+                    items.append(item)
+                return httpx.Response(200, json={"servers": items, "organization_admission": {"required": required, "policy_revision": 1}})
+
+            def report_response(request, connection):
+                assignment, record = next((key, value) for key, value in records.items() if value["connection_id"] == connection)
+                body = json.loads(request.content)
+                names = [record["tool"]] if assignment in allowed else []
+                authorization = {"schema_version": 1, "expires_at": contexts[assignment]["expires_at"], "allowed_tools": names}
+                if "original_tool_name" in body:
+                    authorization["requested_tool"] = {"name": body["original_tool_name"], "allowed": body["original_tool_name"] in names, "reason_code": None}
+                return httpx.Response(200, json={"authorization": authorization})
+
+            with respx.mock(assert_all_called=False) as api:
+                api.get(REGISTRY + "/integrations/profiles/default/servers").mock(side_effect=profile_response)
+                for connection in [CONNECTION, other_connection]:
+                    base = REGISTRY + f"/integrations/connections/{connection}/tool-discoveries"
+                    api.post(base).mock(side_effect=lambda request: httpx.Response(201, json={"data": {"id": str(uuid4())}}, headers={"ETag": '"1"'}))
+                    api.put(url__regex=re.escape(base) + r"/[0-9a-f-]+$").mock(side_effect=lambda request, identity=connection: report_response(request, identity))
+                first_wire = f"{TOOL_PREFIX}___read"
+                second_wire = f"ln_{UUID(other).hex}__read"
+                tools = await router.list_tools("default")
+                assert [tool.name for tool in tools] == [first_wire]
+                assert tools[0].description.startswith("[docs]")
+                assert tools[0].meta["lightnow_proxy_assignment_id"] == ASSIGNMENT
+                assert first_calls() == second_calls() == []
+                with pytest.raises(Exception):
+                    await router.call_tool("default", second_wire, {"value": "denied"})
+                assert second_calls() == []
+                assert not (await router.call_tool("default", first_wire, {"value": "ok"})).is_error
+                assert first_calls() == ["_read"]
+                # Names stay stable when aliases are exchanged.
+                records[ASSIGNMENT]["alias"], records[other]["alias"] = "docs_", "docs"
+                assert [tool.name for tool in await router.list_tools("default")] == [first_wire]
+                assert not (await router.call_tool("default", first_wire, {"value": "renamed"})).is_error
+                assert first_calls() == ["_read", "_read"]
+                assert second_calls() == []
+                # A replacement between metadata and context delivery is also rejected.
+                pending_replacement = str(uuid4())
+                with pytest.raises(Exception) as replaced:
+                    await router.call_tool("default", first_wire, {"value": "rebound"})
+                assert str(unwrap_error(replaced.value)) == "MANAGED_CONTEXT_MISMATCH"
+                required = False
+                # Even an exact local override cannot inherit the detached name.
+                router.config.upstreams[TOOL_PREFIX] = UpstreamConfig(url=second_config["url"])
+                router.config.profiles["default"].upstreams.append(TOOL_PREFIX)
+                with pytest.raises(Exception):
+                    await router.call_tool("default", first_wire, {"value": "stale"})
+                assert first_calls() == ["_read", "_read"]
+                assert second_calls() == []
