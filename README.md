@@ -52,7 +52,8 @@ optional activity capture is disabled. Registry supplies the canonical connectio
 assignment and bounded bootstrap context. Complete private inventory reporting
 returns exact allowed original names from the same backend authorizer as dispatch.
 The Proxy filters discovery and checks that decision again on the actual upstream
-session before one business call. Absolute expiry and a monotonic deadline both
+session before one business call. Expected managed denials return a normal MCP tool
+error containing a content-free reason code. Absolute expiry and a monotonic deadline both
 apply; reporting does not renew the lease. Managed contexts do not authorize
 resource methods. Synchronized profiles bypass persistent tool caches and stale
 fallbacks. Canonical aliases take precedence; required organization admission also

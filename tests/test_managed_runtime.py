@@ -8,12 +8,16 @@ from time import monotonic, time
 from uuid import uuid4
 
 import httpx
+import httpx2
 import jwt
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 import pytest
 import respx
 
+from lightnow_proxy.app import create_app
 from lightnow_proxy.config import AuthConfig, ProfileConfig, ProxyConfig, RegistryApiConfig, RuntimeUpstreamConfig, UpstreamConfig
 from lightnow_proxy.registry import ManagedRuntime, RegistryApiError
 from lightnow_proxy.router import ToolRouter, unwrap_error
@@ -141,6 +145,15 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             with pytest.raises(Exception) as denied:
                 await router.call_tool("default", "docs__write", {"value": "sensitive-value"})
             assert str(unwrap_error(denied.value)) == "MANAGED_TOOL_DENIED"
+            assert calls() == []
+            # Exercise the actual downstream MCP transport as well as the router.
+            app = create_app(router.config, router=router)
+            async with app.router.lifespan_context(app):
+                async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1:8080") as http:
+                    async with Client(streamable_http_client("http://127.0.0.1:8080/mcp", http_client=http)) as downstream:
+                        denied_result = await downstream.session.call_tool("docs__write", arguments={"value": "sensitive-value"})
+                        assert denied_result.is_error is True
+                        assert "MANAGED_TOOL_DENIED" in denied_result.content[0].text
             assert calls() == []
             result = await router.call_tool("default", "docs__read", {"value": "ok"})
             assert result.is_error is False

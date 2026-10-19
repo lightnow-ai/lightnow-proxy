@@ -18,7 +18,7 @@ from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemp
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
-from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient
+from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient, RegistryApiError
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
 from lightnow_proxy.upstream import ToolInventory, UpstreamMCPClient
@@ -385,6 +385,14 @@ class ToolRouter:
                     "error_message": error_message(exc),
                 }
             )
+            leaf = unwrap_error(exc)
+            if isinstance(leaf, RegistryApiError) and str(leaf) in {
+                "MANAGED_TOOL_DENIED", "MANAGED_AUTHORITY_EXPIRED", "MANAGED_CONTEXT_MISMATCH",
+                "MANAGED_RUNTIME_NOT_READY", "INVALID_MANAGED_CONTEXT", "INVALID_TOOL_AUTHORIZATION",
+            }:
+                # Expected managed decisions use the existing downstream MCP
+                # tool-error path, including through native SDK task groups.
+                raise ToolRoutingError(str(leaf)) from None
             raise
 
     async def list_resources(self, profile_name: str) -> list[Resource]:
