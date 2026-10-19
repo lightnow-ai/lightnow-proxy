@@ -384,7 +384,7 @@ class RegistryApiClient:
         principal: Principal | None,
     ) -> ResolvedRuntimeUpstream:
         started = monotonic()
-        payload = await self._fetch_profile_servers(profile_name, include_secrets=self.config.include_secrets)
+        payload = await self._fetch_profile_servers(profile_name, include_secrets=self.config.include_secrets, alias=alias)
         servers = payload.get("servers") if isinstance(payload, dict) else None
         if not isinstance(servers, list):
             raise RegistryApiError("Registry profile servers response must include a servers array")
@@ -468,14 +468,18 @@ class RegistryApiClient:
             raise RegistryApiError("Registry device heartbeat response must be a JSON object")
         return result
 
-    async def _fetch_profile_servers(self, profile_name: str, include_secrets: bool) -> dict[str, Any]:
+    async def _fetch_profile_servers(
+        self, profile_name: str, include_secrets: bool, *, alias: str | None = None,
+    ) -> dict[str, Any]:
         headers = await self._authorization_headers()
         if include_secrets:
             headers["X-LightNow-Runtime-Capabilities"] = MANAGED_CAPABILITY
             if self.runtime_client_id is not None:
                 headers["X-LightNow-Runtime-Client"] = self.runtime_client_id
         url = self._api_url(f"/integrations/profiles/{profile_name}/servers")
-        params = {"include": "secrets"} if include_secrets else None
+        params = {"include": "secrets"} if include_secrets else {}
+        if alias is not None:
+            params["alias"] = alias
         async with self._http_client() as client:
             response = await client.get(url, headers=headers, params=params)
             response.raise_for_status()

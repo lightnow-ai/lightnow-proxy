@@ -963,7 +963,7 @@ async def test_registry_client_fetches_one_profile_upstream_with_secrets(tmp_pat
 
         upstream = await client.fetch_profile_upstream("default", "jenkins", None)
 
-    assert dict(route.calls.last.request.url.params) == {"include": "secrets"}
+    assert dict(route.calls.last.request.url.params) == {"include": "secrets", "alias": "jenkins"}
     assert upstream.name == "jenkins"
     assert upstream.server_name == "custom:jenkins"
     assert str(upstream.config.url) == "https://jenkins.example.test/mcp"
