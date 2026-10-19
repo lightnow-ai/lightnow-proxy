@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.10.0...v1.11.0) (2026-10-19)
+
+
+### Features
+
+* **discovery:** prepare opt-in sanitized setup contributions ([a4acecf](https://github.com/lightnow-ai/lightnow-proxy/commit/a4acecf54ec2ff11ae3726b53305735bd42c72d9))
+
 ## [1.10.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.9.1...v1.10.0) (2026-10-19)
 
 
