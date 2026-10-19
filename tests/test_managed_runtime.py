@@ -22,6 +22,8 @@ from lightnow_proxy.app import create_app
 from lightnow_proxy.config import AuthConfig, ProfileConfig, ProxyConfig, RegistryApiConfig, RuntimeUpstreamConfig, UpstreamConfig
 from lightnow_proxy.registry import ManagedRuntime, RegistryApiError
 from lightnow_proxy.router import ToolRouter, unwrap_error
+from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
+from lightnow_proxy.config import RuntimeSecretsConfig
 from lightnow_proxy.upstream import ToolInventory
 from test_mcp_app import run_math_upstream_server
 
@@ -44,6 +46,47 @@ def managed_context() -> dict:
         "policy_revision": 1, "admission_required": True, "source_sequence": 1, "source_expires_at": now + 45,
         "issued_at": now, "expires_at": now + 45, "context_proof": "private-proof-do-not-log",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport,target", [("http", "header"), ("stdio", "env")])
+async def test_managed_context_reuses_external_secret_resolution_and_original_deadline(tmp_path, transport, target, monkeypatch):
+    router = managed_router(tmp_path)
+    client = router.registry_client
+    client.runtime_client_id = CLIENT
+    config = {"transport": transport, **({"url": "https://fixture.example.test/mcp"} if transport == "http" else {"command": "fixture"})}
+    item = {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "linked",
+            "managed": managed_context(), "client_config": config, "context": {
+                "probe_request": {"transport": transport, transport: {}}, "external_secret_bindings": [{
+                    "provider": {"id": "fixture-provider", "provider_type": "vault_kv_v2", "resolution_mode": "runtime", "config": {}},
+                    "locator": {"path": "secret/data/fixture", "field": "token"}, "target": {"type": target, "name": "FIXTURE_TOKEN"},
+                }],
+            }}
+    client.runtime_secret_resolver = None
+    with pytest.raises(RegistryApiError, match="RUNTIME_SECRET_RESOLVER_REQUIRED"):
+        await client._profile_server_to_upstream(item, "default", None)
+    client.runtime_secret_resolver = RuntimeSecretResolver(RuntimeSecretsConfig())
+    with respx.mock(assert_all_called=True) as mock:
+        vault = mock.get("http://127.0.0.1:8200/v1/secret/data/fixture").respond(200, json={"data": {"data": {"token": "fixture-secret"}}})
+        resolved = await client._profile_server_to_upstream(item, "default", None)
+        assert (resolved.config.headers if transport == "http" else resolved.config.env)["FIXTURE_TOKEN"] == "fixture-secret"
+        assert vault.call_count == 1
+        # External IO cannot extend the authority that preceded it.
+        with pytest.raises(RegistryApiError, match="MANAGED_AUTHORITY_EXPIRED"):
+            await client._profile_server_to_upstream(item, "default", None, started=monotonic() - 60)
+        assert vault.call_count == 1
+        native_resolve = client.runtime_secret_resolver.resolve_context
+        clock = monotonic()
+
+        async def resolve_after_expiry(context):
+            result = await native_resolve(context)
+            monkeypatch.setattr("lightnow_proxy.registry.monotonic", lambda: clock + 60)
+            return result
+
+        monkeypatch.setattr(client.runtime_secret_resolver, "resolve_context", resolve_after_expiry)
+        with pytest.raises(RegistryApiError, match="MANAGED_AUTHORITY_EXPIRED"):
+            await client._profile_server_to_upstream(item, "default", None, started=clock)
+        assert vault.call_count == 2
 
 
 @asynccontextmanager

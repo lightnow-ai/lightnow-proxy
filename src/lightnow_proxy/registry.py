@@ -528,6 +528,8 @@ class RegistryApiClient:
                     or str(managed.assignment_id) != item.get("assignment_id")):
                 raise RegistryApiError("MANAGED_CONTEXT_MISMATCH")
             managed.assert_current()
+            client_config = await self._resolve_profile_client_config(item, client_config)
+            managed.assert_current()
             return ResolvedRuntimeUpstream(
                 name=alias,
                 config=self._profile_client_upstream_config(
@@ -619,10 +621,12 @@ class RegistryApiClient:
     ) -> dict[str, Any]:
         """Overlay runtime-only secrets onto the canonical profile config."""
         context = item.get("context")
-        if self.runtime_secret_resolver is None or not isinstance(context, dict):
+        if not isinstance(context, dict):
             return client_config
         if not context.get("external_secret_bindings"):
             return client_config
+        if self.runtime_secret_resolver is None:
+            raise RegistryApiError("RUNTIME_SECRET_RESOLVER_REQUIRED")
 
         probe_request = context.get("probe_request")
         if not isinstance(probe_request, dict):
