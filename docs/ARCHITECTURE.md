@@ -117,10 +117,12 @@ Runtime telemetry emits events for:
 
 When a CLI-generated Local Proxy configuration includes stable device and
 client-instance UUIDs, the proxy also sends one presence heartbeat at startup
-and every 120 seconds. The Registry API computes active presence with a
+and every 120 seconds (15 seconds for synchronized managed runtimes). The Registry API computes active presence with a
 300-second threshold. Heartbeat failures are logged and exposed through local
 status, but never block MCP traffic; the next regular heartbeat is the only
-retry. Disabling runtime telemetry disables both events and presence.
+retry. Disabling optional telemetry disables legacy activity and presence-only
+heartbeats. Synchronized managed runtimes retain their heartbeat and required
+call-evidence uploader independently of that preference.
 
 Events identify both the MCP end-client (`mcp_client_name`, for example
 `codex`) and the local process (`runner_name`, for example
@@ -190,3 +192,38 @@ and trailing slashes. Top-level paths such as `/lightnow-proxy-admins` therefore
 match `lightnow-proxy-admins`, but nested groups are not reduced to their final
 path segment. For example, `/team-a/admin` does not grant access to a profile
 requiring `/team-b/admin` or plain `admin`.
+
+## Required managed call evidence
+
+Managed calls use Registry's existing `POST /integrations/runtime-events` v2
+contract (`registry-api/specs/managed-runtime-event.schema.json`). This is
+independent of optional activity capture and never includes arguments, results,
+credentials, transport URLs or raw errors. The encrypted reporting receipt is
+private local queue material; it is not an execution grant or an upstream
+attestation. Tool names require a completed private discovery observation.
+
+The proxy uses Python's native SQLite journal, with FULL synchronization and
+short transactions, under a private directory beside the CLI session. A managed
+call reserves bounded queue capacity and commits `attempted` before upstream
+startup, then `dispatch_started` after fresh authorization and immediately before
+the single business handoff. A received MCP response permits `dispatched` and
+`succeeded`/`upstream_failed`; transport loss after handoff is `outcome_unknown`.
+Pre-handoff infrastructure failures are `runtime_failed`; a tool-policy refusal
+is `denied`. No tool call is retried by this journal.
+
+Every call holds the existing native OS file lock for its UUID. Other proxy
+processes may share the journal, but cannot recover a live call. After an owner
+process exits, recovery records `runtime_failed` for pre-handoff calls or
+`outcome_unknown` after a committed handoff intent. It never invents success.
+Pending events retain their UUID, original receipt and actor/environment binding
+through every upload retry. Upload uses the same CLI subject/issuer and Registry
+API, without the currently selected tenant header; Registry derives the owner
+from the original receipt. Account changes cannot relabel queued events.
+
+A separate bounded uploader runs for synced local proxies even when optional
+telemetry or device presence is disabled. Delivery retries only immutable event
+uploads. Expired/rejected reports remain visible as unresolved queue items; they
+are not silently deleted. Queue corruption, missing receipts or exhausted local
+capacity blocks managed dispatch explicitly. The status endpoint exposes only
+counts and closed failure codes. The queue is limited to 2,000 unfinished calls,
+with at most four facts per call, and completed acknowledged calls are removed.

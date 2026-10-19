@@ -13,12 +13,15 @@ from typing import Any, Mapping
 from urllib.parse import quote, unquote
 from uuid import UUID
 
+import httpx
+
 from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemplate, TextContent, Tool
 
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
-from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient, RegistryApiError, managed_tool_namespace
+from lightnow_proxy.managed_events import EvidenceStoreError, ManagedEventOutbox
+from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, ManagedToolDenied, RegistryApiClient, RegistryApiError, managed_tool_namespace
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
 from lightnow_proxy.upstream import ToolDiscoveryError, ToolInventory, UpstreamMCPClient
@@ -129,6 +132,9 @@ class ToolRouter:
         self.device_heartbeat_last_success_at: datetime | None = None
         self.device_heartbeat_last_error: str | None = None
         self._discovery_tasks: dict[str, asyncio.Task[None]] = {}
+        self._managed_outbox: ManagedEventOutbox | None = None
+        self._managed_report_error: str | None = None
+        self._managed_upload_lock = asyncio.Lock()
 
     def update_client_context(
         self,
@@ -346,15 +352,7 @@ class ToolRouter:
             if upstream.managed is None:
                 result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {})
             else:
-                if self.registry_client is None:
-                    raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
-                upstream.managed.assert_current()
-
-                async def authorize(inventory: ToolInventory) -> None:
-                    await self.registry_client.authorize_inventory(upstream.managed, inventory, routed.original_name)
-                    upstream.managed.assert_current()
-
-                result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {}, authorize=authorize)
+                result = await self._call_managed_tool(upstream, routed.original_name, arguments or {})
             await self._emit_call_event(
                 profile_name,
                 proxied_tool_name,
@@ -388,6 +386,8 @@ class ToolRouter:
                 }
             )
             leaf = unwrap_error(exc)
+            if isinstance(leaf, EvidenceStoreError):
+                raise ToolRoutingError("EVIDENCE_STORE_UNAVAILABLE") from None
             if isinstance(leaf, RegistryApiError) and str(leaf) in {
                 "MANAGED_TOOL_DENIED", "MANAGED_AUTHORITY_EXPIRED", "MANAGED_CONTEXT_MISMATCH",
                 "MANAGED_RUNTIME_NOT_READY", "INVALID_MANAGED_CONTEXT", "INVALID_TOOL_AUTHORIZATION",
@@ -396,6 +396,94 @@ class ToolRouter:
                 # tool-error path, including through native SDK task groups.
                 raise ToolRoutingError(str(leaf)) from None
             raise
+
+    def managed_events_enabled(self) -> bool:
+        return bool(self.registry_client and self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow)
+
+    def _event_outbox(self) -> ManagedEventOutbox:
+        if self._managed_outbox is None:
+            if self.config.registry_api is None:
+                raise EvidenceStoreError()
+            session_path = self.config.registry_api.cli_session_path or self.config.registry_api.cli_config_path
+            self._managed_outbox = ManagedEventOutbox(Path(session_path).expanduser().parent / "managed-runtime" / "events.sqlite3")
+        return self._managed_outbox
+
+    async def _call_managed_tool(self, upstream: ProfileUpstream, tool_name: str, arguments: dict[str, Any]) -> CallToolResult:
+        managed = upstream.managed
+        if self.registry_client is None or managed is None:
+            raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
+        identity = await self.registry_client.managed_report_identity()
+        outbox = self._event_outbox()
+        call = outbox.begin(managed, identity)
+        try:
+            managed.assert_current()
+
+            async def authorize(inventory: ToolInventory) -> None:
+                def observed(observation_id: str) -> None:
+                    call.observation_id = observation_id
+                    if any(tool.name == tool_name for tool in inventory.tools):
+                        call.original_tool_name = tool_name
+
+                await self.registry_client.authorize_inventory(managed, inventory, tool_name, observed=observed)
+                managed.assert_current()
+                outbox.record(call, "dispatch_started")
+                try:
+                    managed.assert_current()
+                except RegistryApiError:
+                    call.handoff = False
+                    raise
+
+            result = await self.upstream_client.call_tool(upstream.config, tool_name, arguments, authorize=authorize)
+        except BaseException as exc:
+            leaf = unwrap_error(exc)
+            if call.handoff:
+                outbox.record(call, "outcome_unknown", "UPSTREAM_OUTCOME_UNKNOWN")
+            elif isinstance(leaf, RegistryApiError) and str(leaf) in {"MANAGED_TOOL_DENIED", "MANAGED_AUTHORITY_EXPIRED"}:
+                outbox.record(call, "denied", leaf.reason_code if isinstance(leaf, ManagedToolDenied) else str(leaf))
+            else:
+                code = str(leaf) if isinstance(leaf, RegistryApiError) and str(leaf) in {
+                    "MANAGED_CONTEXT_MISMATCH", "MANAGED_RUNTIME_NOT_READY",
+                } else "EVIDENCE_STORE_UNAVAILABLE" if isinstance(leaf, EvidenceStoreError) else "RUNTIME_START_FAILED"
+                if isinstance(leaf, httpx.HTTPError):
+                    code = "CONTROL_PLANE_UNAVAILABLE"
+                outbox.record(call, "runtime_failed", code)
+            raise
+        else:
+            outbox.record(call, "upstream_failed" if result.is_error else "succeeded", "UPSTREAM_FAILED" if result.is_error else None)
+            return result
+        finally:
+            call.release()
+
+    async def flush_managed_events(self) -> None:
+        if self.registry_client is None or self._managed_upload_lock.locked():
+            return
+        async with self._managed_upload_lock:
+            try:
+                identity = await self.registry_client.managed_report_identity()
+                outbox = self._event_outbox()
+                for event in outbox.pending(identity):
+                    try:
+                        await self.registry_client.post_managed_runtime_event(event, identity)
+                    except httpx.HTTPStatusError as exc:
+                        status = exc.response.status_code
+                        if status in {400, 403, 404, 409, 413, 422}:
+                            outbox.reject(event["id"], f"REPORT_REJECTED_{status}")
+                            continue
+                        raise
+                    outbox.acknowledge(event["id"])
+                self._managed_report_error = None
+            except Exception:
+                # Exception text can contain URLs, headers or private receipts.
+                self._managed_report_error = "REPORT_DELIVERY_UNAVAILABLE"
+
+    async def run_managed_event_loop(self) -> None:
+        while True:
+            await self.flush_managed_events()
+            await asyncio.sleep(5)
+
+    def managed_event_status(self) -> dict[str, Any]:
+        return {"enabled": self.managed_events_enabled(), **(self._managed_outbox.status() if self._managed_outbox else {}),
+                "delivery_error": self._managed_report_error}
 
     async def list_resources(self, profile_name: str) -> list[Resource]:
         started = monotonic()

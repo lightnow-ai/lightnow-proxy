@@ -301,6 +301,7 @@ async def status(_request: Request, config: ProxyConfig, router: ToolRouter) -> 
                 "policy_mode": config.local_proxy.policy_mode,
                 "allow_unmanaged_client_servers": config.local_proxy.allow_unmanaged_client_servers,
                 "device_heartbeat": device_heartbeat_status(router),
+                "managed_events": router.managed_event_status() if hasattr(router, "managed_event_status") else {"enabled": False},
             },
             "registry_api": {
                 "enabled": bool(config.registry_api and config.registry_api.enabled),
@@ -354,6 +355,7 @@ def create_app(
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
             heartbeat_task: asyncio.Task[None] | None = None
+            event_task: asyncio.Task[None] | None = None
             if local_proxy_app is not None:
                 await stack.enter_async_context(local_proxy_app.session_manager.run())
                 await emit_lifecycle_event(router, "runner_started")
@@ -364,15 +366,18 @@ def create_app(
                     )
             for profile_app in profile_apps.values():
                 await stack.enter_async_context(profile_app.session_manager.run())
+            if getattr(router, "managed_events_enabled", lambda: False)():
+                event_task = asyncio.create_task(router.run_managed_event_loop(), name="lightnow-managed-events")
             try:
                 yield
             finally:
                 if local_proxy_app is not None:
                     await emit_lifecycle_event(router, "runner_stopped")
-                if heartbeat_task is not None:
-                    heartbeat_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await heartbeat_task
+                for task in (heartbeat_task, event_task):
+                    if task is not None:
+                        task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await task
 
     return Starlette(routes=routes, lifespan=lifespan)
 

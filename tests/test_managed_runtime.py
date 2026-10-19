@@ -46,7 +46,7 @@ def managed_context() -> dict:
         "assignment_id": ASSIGNMENT, "assignment_revision": 2, "connection_id": CONNECTION, "connection_revision": 1,
         "credential_principal_type": "user", "credential_principal_id": actor, "credential_binding_id": None, "credential_revision": 0,
         "policy_revision": 1, "admission_required": True, "source_sequence": 1, "source_expires_at": now + 45,
-        "issued_at": now, "expires_at": now + 45, "context_proof": "private-proof-do-not-log",
+        "issued_at": now, "expires_at": now + 45, "context_proof": "private-proof-do-not-log", "reporting_proof": "private-report-do-not-log",
     }
 
 
@@ -281,6 +281,7 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
         contexts = []
         state = {"allow": True, "available": True}
         reports = []
+        facts = []
         expired = False
         # This obsolete cache must never revive a hidden tool.
         (tmp_path / "tools.json").write_text(json.dumps({"generated_at": time(), "tools": [Tool(name=f"{TOOL_PREFIX}__write", input_schema={}).model_dump(by_alias=True)]}))
@@ -314,6 +315,12 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             return httpx.Response(200, json={"authorization": authorization})
 
         with respx.mock(assert_all_called=False) as api:
+            def accept_event(request):
+                facts.append(json.loads(request.content))
+                assert "X-Tenant" not in request.headers
+                return httpx.Response(201, json={"event": json.loads(request.content)})
+
+            api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=accept_event)
             api.get(REGISTRY + "/integrations/profiles/default/servers").mock(side_effect=profile_response)
             base = REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries"
             api.post(base).respond(201, json={"data": {"id": DISCOVERY}}, headers={"ETag": '"attempt:1"'})
@@ -335,6 +342,20 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             result = await router.call_tool("default", f"{TOOL_PREFIX}__read", {"value": "ok"})
             assert result.is_error is False
             assert calls() == ["read"]
+            # Failing the durable pre-handoff commit must leave the actual SDK
+            # upstream untouched, while retaining the attempted/runtime failure.
+            from lightnow_proxy.managed_events import EvidenceStoreError
+            native_record = router._event_outbox().record
+            def fail_handoff_once(call, phase, reason=None):
+                if phase == "dispatch_started":
+                    raise EvidenceStoreError()
+                return native_record(call, phase, reason)
+            with monkeypatch.context() as storage_fault:
+                storage_fault.setattr(router._event_outbox(), "record", fail_handoff_once)
+                with pytest.raises(Exception) as unavailable:
+                    await router.call_tool("default", f"{TOOL_PREFIX}__read", {"value": "sensitive-value"})
+                assert str(unwrap_error(unavailable.value)) == "EVIDENCE_STORE_UNAVAILABLE"
+            assert calls() == ["read"]
             expired = True
             with monkeypatch.context() as clocks:
                 # Scope the changed clock to this response/dispatch attempt.
@@ -355,6 +376,17 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
             with pytest.raises(httpx.HTTPStatusError):
                 await router.list_tools("default")
             assert calls() == ["read"]
+            await router.flush_managed_events()
+            assert router.managed_event_status()["pending"] == 0
+            assert {fact["phase"] for fact in facts} >= {"attempted", "denied", "dispatch_started", "dispatched", "succeeded"}
+            assert any(fact.get("reason_code") == "TOOL_NOT_SELECTED" for fact in facts)
+            assert any(fact["phase"] == "runtime_failed" and fact.get("reason_code") == "EVIDENCE_STORE_UNAVAILABLE" for fact in facts)
+            assert sum(fact["phase"] == "succeeded" for fact in facts) == 1
+            assert sum(fact["phase"] == "dispatch_started" for fact in facts) == 1
+            assert all(fact["schema_version"] == 2 for fact in facts)
+            assert all("observation_id" in fact for fact in facts if fact["phase"] == "succeeded")
+            assert "sensitive-value" not in json.dumps(facts)
+            assert not any(key in fact for fact in facts for key in {"arguments", "result", "request_bytes", "error_message", "server_alias"})
         assert "sensitive-value" not in json.dumps(reports)
         assert "private-proof-do-not-log" not in repr(await router.registry_client._profile_server_to_upstream(
             {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "linked", "managed": managed_context(), "client_config": client_config},
@@ -457,7 +489,7 @@ async def test_managed_names_stay_bound_to_assignment_through_alias_collision_re
                 names = [record["tool"]] if assignment in allowed else []
                 authorization = {"schema_version": 1, "expires_at": contexts[assignment]["expires_at"], "allowed_tools": names}
                 if "original_tool_name" in body:
-                    authorization["requested_tool"] = {"name": body["original_tool_name"], "allowed": body["original_tool_name"] in names, "reason_code": None}
+                    authorization["requested_tool"] = {"name": body["original_tool_name"], "allowed": body["original_tool_name"] in names, "reason_code": None if body["original_tool_name"] in names else "TOOL_NOT_SELECTED"}
                 return httpx.Response(200, json={"authorization": authorization})
 
             with respx.mock(assert_all_called=False) as api:

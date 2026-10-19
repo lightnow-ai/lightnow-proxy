@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 from time import monotonic, time
-from typing import Literal
+from typing import Callable, Literal
 from uuid import UUID
 from typing import Any
 from urllib.parse import quote
@@ -29,6 +29,19 @@ logger = logging.getLogger(__name__)
 
 class RegistryApiError(Exception):
     pass
+
+
+class ManagedToolDenied(RegistryApiError):
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        super().__init__("MANAGED_TOOL_DENIED")
+
+
+MANAGED_DENIAL_REASONS = {
+    "TOOL_NOT_SELECTED", "TOOL_SELECTION_REQUIRED", "TOOL_INVENTORY_UNAVAILABLE", "TOOL_INVENTORY_STALE",
+    "TOOL_UNAVAILABLE", "TOOL_DEFINITION_CHANGED", "CONNECTION_ACCESS_DENIED", "PROFILE_ACCESS_DENIED",
+    "PROFILE_UNAVAILABLE", "PROFILE_ROLE_DENIED", "PROFILE_AUDIENCE_DENIED", "ASSIGNMENT_UNAVAILABLE", "MANAGED_AUTHORITY_EXPIRED",
+}
 
 
 async def _release_file_lock(lock: FileLock) -> None:
@@ -223,6 +236,7 @@ class ManagedRuntime(BaseModel):
     issued_at: StrictInt
     expires_at: StrictInt
     context_proof: str = Field(repr=False, min_length=1)
+    reporting_proof: str | None = Field(default=None, repr=False, min_length=1, max_length=16384)
     deadline: float = Field(repr=False, exclude=True)
 
     @property
@@ -414,6 +428,7 @@ class RegistryApiClient:
 
     async def authorize_inventory(
         self, managed: ManagedRuntime, inventory: ToolInventory, original_tool_name: str | None = None,
+        *, observed: Callable[[str], None] | None = None,
     ) -> set[str]:
         managed.assert_current()
         headers = await self._authorization_headers()
@@ -430,7 +445,7 @@ class RegistryApiClient:
                 etag = response.headers["ETag"]
             except (KeyError, TypeError, ValueError):
                 raise RegistryApiError("INVALID_DISCOVERY_RESPONSE") from None
-        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name)
+        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name, observed=observed)
 
     async def report_discovery(
         self, managed: ManagedRuntime, attempt_id: str, etag: str, report: dict[str, Any],
@@ -449,7 +464,7 @@ class RegistryApiClient:
 
     async def report_inventory(
         self, managed: ManagedRuntime, inventory: ToolInventory, attempt_id: str, etag: str,
-        original_tool_name: str | None = None,
+        original_tool_name: str | None = None, *, observed: Callable[[str], None] | None = None,
     ) -> set[str]:
         report = {"status": "complete", "page_count": inventory.page_count, "duration_ms": inventory.duration_ms,
                   "tools": [tool.model_dump(by_alias=True, mode="json", exclude_none=True) for tool in inventory.tools]}
@@ -464,14 +479,48 @@ class RegistryApiClient:
         allowed = set(authorization["allowed_tools"])
         if not allowed.issubset({tool.name for tool in inventory.tools}):
             raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+        if observed is not None:
+            observed(attempt_id)
         if original_tool_name is not None:
             decision = authorization.get("requested_tool")
             if not isinstance(decision, dict) or decision.get("name") != original_tool_name:
                 raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
             if decision.get("allowed") is not True or original_tool_name not in allowed:
-                raise RegistryApiError("MANAGED_TOOL_DENIED")
+                reason = decision.get("reason_code")
+                if not isinstance(reason, str) or reason not in MANAGED_DENIAL_REASONS:
+                    raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+                raise ManagedToolDenied(reason)
         managed.assert_current()
         return allowed
+
+    async def managed_report_identity(self) -> tuple[str, str, str]:
+        if not self.config.use_cli_session:
+            raise RegistryApiError("MANAGED_REPORT_SESSION_REQUIRED")
+        session = await self._cli_session()
+        claims = session.token_claims()
+        issuer, subject = claims.get("iss"), claims.get("sub")
+        if (not isinstance(issuer, str) or issuer.rstrip("/") != session.issuer.rstrip("/")
+                or not isinstance(subject, str) or not subject):
+            raise RegistryApiError("MANAGED_REPORT_SESSION_REQUIRED")
+        return self._api_url("/integrations/runtime-events"), issuer.rstrip("/"), subject
+
+    async def post_managed_runtime_event(self, payload: dict[str, Any], identity: tuple[str, str, str]) -> None:
+        # Re-read after refresh/account switches; never use the currently selected
+        # tenant to relabel historical facts. Registry derives it from the receipt.
+        if await self.managed_report_identity() != identity:
+            raise RegistryApiError("MANAGED_REPORT_SUBJECT_CHANGED")
+        session = await self._cli_session()
+        claims = session.token_claims()
+        if (claims.get("sub") != identity[2] or claims.get("iss", "").rstrip("/") != identity[1]):
+            raise RegistryApiError("MANAGED_REPORT_SUBJECT_CHANGED")
+        async with self._http_client() as client:
+            response = await client.post(identity[0], headers={"Authorization": f"Bearer {session.access_token}"}, json=payload)
+            response.raise_for_status()
+            record = response.json()
+            event = record.get("event") if isinstance(record, dict) else None
+            if (response.status_code != 201 or not isinstance(event, dict)
+                    or any(event.get(key) != payload[key] for key in ("schema_version", "id", "call_id", "phase"))):
+                raise RegistryApiError("INVALID_RUNTIME_REPORT_RESPONSE")
 
     async def post_runtime_event(self, payload: dict[str, Any]) -> None:
         headers = await self._authorization_headers()
