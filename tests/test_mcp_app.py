@@ -17,6 +17,8 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.client.streamable_http import streamable_http_client
 from mcp import types
 from mcp.types import CallToolResult, TextContent, Tool
+from mcp.shared.exceptions import MCPError
+from mcp_types import HEADER_MISMATCH
 import pytest
 import respx
 from starlette.applications import Starlette
@@ -38,6 +40,7 @@ from lightnow_proxy.config import (
 )
 from lightnow_proxy.health import build_health_report
 from lightnow_proxy.registry import RegistryApiClient, ResolvedRuntimeUpstream
+from lightnow_proxy.router import unwrap_error
 from lightnow_proxy.upstream import UpstreamMCPClient
 
 
@@ -1281,9 +1284,9 @@ if __name__ == "__main__":
 
 
 @asynccontextmanager
-async def run_math_upstream_server() -> AsyncIterator[str]:
+async def run_math_upstream_server(app: Server | None = None) -> AsyncIterator[str]:
     manager = StreamableHTTPSessionManager(
-        app=build_math_upstream_server(),
+        app=app or build_math_upstream_server(),
         json_response=False,
         stateless=True,
     )
@@ -1319,6 +1322,61 @@ async def run_math_upstream_server() -> AsyncIterator[str]:
     finally:
         server.should_exit = True
         await task
+
+
+@pytest.mark.asyncio
+async def test_http_discovery_reads_all_pages_and_prepares_second_page_call_schema() -> None:
+    cursors = []
+    business_calls = []
+    schema = {"type": "object", "properties": {"region": {"type": "string", "x-mcp-header": "Region"}}, "required": ["region"]}
+
+    async def list_tools(_ctx, params) -> types.ListToolsResult:
+        cursors.append(params.cursor)
+        return types.ListToolsResult(
+            tools=[Tool(name="first" if params.cursor is None else "second", input_schema=schema)],
+            next_cursor="page-2" if params.cursor is None else None,
+            ttl_ms=0,
+            cache_scope="private",
+        )
+
+    async def call_tool(_ctx, params) -> CallToolResult:
+        business_calls.append(params.name)
+        if params.arguments.get("region") == "changed":
+            raise MCPError(HEADER_MISMATCH, "Synthetic changed schema")
+        return CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    server = Server("paged-upstream", version="0.1.0", on_list_tools=list_tools, on_call_tool=call_tool)
+    async with run_math_upstream_server(server) as url:
+        upstream = UpstreamConfig(url=url)
+        client = UpstreamMCPClient()
+        assert [tool.name for tool in await client.list_tools(upstream)] == ["first", "second"]
+        assert cursors == [None, "page-2"]
+        assert business_calls == []
+        result = await client.call_tool(upstream, "second", {"region": "test"})
+        assert result.is_error is False
+        assert business_calls == ["second"]
+
+        async def deny(inventory):
+            assert inventory.page_count == 2
+            raise PermissionError("TOOL_NOT_SELECTED")
+
+        with pytest.raises(ExceptionGroup) as denied:
+            await client.call_tool(upstream, "second", {"region": "test"}, authorize=deny)
+        assert isinstance(unwrap_error(denied.value), PermissionError)
+        assert str(unwrap_error(denied.value)) == "TOOL_NOT_SELECTED"
+        assert business_calls == ["second"]
+
+        async def allow(inventory):
+            assert [tool.name for tool in inventory.tools] == ["first", "second"]
+
+        result = await client.call_tool(upstream, "second", {"region": "test"}, authorize=allow)
+        assert result.is_error is False
+        assert business_calls == ["second", "second"]
+        with pytest.raises(ExceptionGroup) as changed:
+            await client.call_tool(upstream, "second", {"region": "changed"}, authorize=allow)
+        assert isinstance(unwrap_error(changed.value), MCPError)
+        assert unwrap_error(changed.value).code == HEADER_MISMATCH
+        assert business_calls == ["second", "second", "second"]
 
 
 class MathUpstreamApp:

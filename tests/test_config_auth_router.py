@@ -22,6 +22,7 @@ from lightnow_proxy.config import (
     UpstreamConfig,
     load_config,
 )
+from lightnow_proxy.registry import ResolvedRuntimeProfile
 from lightnow_proxy.router import ToolRouter, prefix_resource, prefix_tool, route_resource, runtime_request_metadata
 
 
@@ -244,7 +245,7 @@ async def test_router_loads_local_proxy_upstreams_from_lightnow_profile() -> Non
         def __init__(self) -> None:
             self.events: list[dict] = []
 
-        async def fetch_profile_upstreams(
+        async def fetch_profile(
             self,
             profile_name: str,
             principal: Principal | None,
@@ -256,8 +257,9 @@ async def test_router_loads_local_proxy_upstreams_from_lightnow_profile() -> Non
                 name = "grafana"
                 config = UpstreamConfig(url="https://grafana.example.test/mcp")
                 server_name = "grafana"
+                managed = None
 
-            return [Resolved()]
+            return ResolvedRuntimeProfile([Resolved()], False)
 
         async def post_runtime_event(self, payload: dict) -> None:
             self.events.append(payload)
@@ -298,7 +300,7 @@ async def test_router_list_tools_skips_unavailable_upstreams() -> None:
         def __init__(self) -> None:
             self.events: list[dict] = []
 
-        async def fetch_profile_upstreams(
+        async def fetch_profile(
             self,
             profile_name: str,
             principal: Principal | None,
@@ -310,13 +312,15 @@ async def test_router_list_tools_skips_unavailable_upstreams() -> None:
                 name = "jenkins"
                 config = UpstreamConfig(url="https://jenkins.example.test/mcp")
                 server_name = "custom:jenkins"
+                managed = None
 
             class Broken:
                 name = "kubernetes"
                 config = UpstreamConfig(transport="stdio", command="kubernetes-mcp-server")
                 server_name = "io.github.containers/kubernetes-mcp-server"
+                managed = None
 
-            return [Working(), Broken()]
+            return ResolvedRuntimeProfile([Working(), Broken()], False)
 
         async def post_runtime_event(self, payload: dict) -> None:
             self.events.append(payload)
@@ -358,7 +362,7 @@ async def test_router_lists_upstream_tools_concurrently() -> None:
         def __init__(self) -> None:
             self.events: list[dict] = []
 
-        async def fetch_profile_upstreams(
+        async def fetch_profile(
             self,
             profile_name: str,
             principal: Principal | None,
@@ -370,13 +374,15 @@ async def test_router_lists_upstream_tools_concurrently() -> None:
                 name = "first"
                 config = UpstreamConfig(url="https://first.example.test/mcp")
                 server_name = "custom:first"
+                managed = None
 
             class Second:
                 name = "second"
                 config = UpstreamConfig(url="https://second.example.test/mcp")
                 server_name = "custom:second"
+                managed = None
 
-            return [First(), Second()]
+            return ResolvedRuntimeProfile([First(), Second()], False)
 
         async def post_runtime_event(self, payload: dict) -> None:
             self.events.append(payload)
@@ -415,7 +421,7 @@ async def test_router_lists_upstream_tools_concurrently() -> None:
 
 
 @pytest.mark.asyncio
-async def test_router_uses_fresh_persistent_tool_cache(tmp_path) -> None:
+async def test_router_uses_fresh_persistent_tool_cache_for_unsynchronized_profile(tmp_path) -> None:
     class FakeRegistryClient:
         async def fetch_profile_upstreams(
             self,
@@ -442,7 +448,7 @@ async def test_router_uses_fresh_persistent_tool_cache(tmp_path) -> None:
         local_proxy={
             "enabled": True,
             "profile": "default",
-            "sync_from_lightnow": True,
+            "sync_from_lightnow": False,
             "tool_cache_path": str(cache_path),
         },
         auth=AuthConfig(enabled=False, issuer="https://auth.example.test/realms/example"),
@@ -465,9 +471,9 @@ async def test_router_resolves_only_target_lightnow_upstream_for_tool_calls() ->
             self.events: list[dict] = []
             self.fetch_all_called = False
 
-        async def fetch_profile_upstream_names(self, profile_name: str) -> list[str]:
+        async def fetch_profile_metadata(self, profile_name: str) -> dict:
             assert profile_name == "default"
-            return ["grafana", "jenkins"]
+            return {"servers": [{"alias": "grafana"}, {"alias": "jenkins"}]}
 
         async def fetch_profile_upstream(
             self,
@@ -483,6 +489,7 @@ async def test_router_resolves_only_target_lightnow_upstream_for_tool_calls() ->
                 name = "jenkins"
                 config = UpstreamConfig(url="https://jenkins.example.test/mcp")
                 server_name = "custom:jenkins"
+                managed = None
 
             return Resolved()
 

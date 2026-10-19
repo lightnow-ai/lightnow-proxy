@@ -8,23 +8,40 @@ import logging
 import os
 from pathlib import Path
 import tempfile
+from time import monotonic, time
+from typing import Awaitable, Callable, Literal
+from uuid import UUID
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 import jwt
 from filelock import FileLock, Timeout as FileLockTimeout
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 
 from lightnow_proxy.auth import Principal
 from lightnow_proxy.config import RegistryApiConfig, RuntimeUpstreamConfig, UpstreamConfig
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
+from lightnow_proxy.upstream import ToolInventory
 
 logger = logging.getLogger(__name__)
 
 
 class RegistryApiError(Exception):
     pass
+
+
+class ManagedToolDenied(RegistryApiError):
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        super().__init__("MANAGED_TOOL_DENIED")
+
+
+MANAGED_DENIAL_REASONS = {
+    "TOOL_NOT_SELECTED", "TOOL_SELECTION_REQUIRED", "TOOL_INVENTORY_UNAVAILABLE", "TOOL_INVENTORY_STALE",
+    "TOOL_UNAVAILABLE", "TOOL_DEFINITION_CHANGED", "CONNECTION_ACCESS_DENIED", "PROFILE_ACCESS_DENIED",
+    "PROFILE_UNAVAILABLE", "PROFILE_ROLE_DENIED", "PROFILE_AUDIENCE_DENIED", "ASSIGNMENT_UNAVAILABLE", "MANAGED_AUTHORITY_EXPIRED",
+}
 
 
 async def _release_file_lock(lock: FileLock) -> None:
@@ -180,11 +197,72 @@ class CliSession:
             raise
 
 
+MANAGED_CAPABILITY = "managed-connections.v1"
+
+
+def managed_tool_namespace(assignment_id: str | UUID) -> str:
+    try:
+        identity = assignment_id if isinstance(assignment_id, UUID) else UUID(assignment_id)
+    except (ValueError, TypeError, AttributeError):
+        raise RegistryApiError("INVALID_MANAGED_CONTEXT") from None
+    return f"ln_{identity.hex}"
+
+
+class ManagedRuntime(BaseModel):
+    """One response-bound bootstrap lease; never a cached bearer grant."""
+
+    model_config = ConfigDict(frozen=True)
+    schema_version: Literal[1]
+    purpose: Literal["managed-discovery"]
+    actor_id: UUID
+    owner_type: Literal["user", "tenant"]
+    owner_id: UUID
+    runtime_client_id: UUID
+    profile: str
+    profile_id: UUID
+    profile_revision: StrictInt
+    assignment_id: UUID
+    assignment_revision: StrictInt
+    connection_id: UUID
+    connection_revision: StrictInt
+    credential_principal_type: Literal["user", "tenant"]
+    credential_principal_id: UUID
+    credential_binding_id: UUID | None = None
+    credential_revision: StrictInt
+    policy_revision: StrictInt
+    admission_required: StrictBool
+    source_sequence: StrictInt | None
+    source_expires_at: StrictInt | None
+    issued_at: StrictInt
+    expires_at: StrictInt
+    context_proof: str = Field(repr=False, min_length=1)
+    reporting_proof: str | None = Field(default=None, repr=False, min_length=1, max_length=16384)
+    deadline: float = Field(repr=False, exclude=True)
+
+    @property
+    def tool_namespace(self) -> str:
+        return managed_tool_namespace(self.assignment_id)
+
+    def assert_current(self) -> None:
+        if (self.expires_at <= self.issued_at or self.expires_at > self.issued_at + 60
+                or time() >= self.expires_at or monotonic() >= self.deadline
+                or (self.owner_type == "tenant" and
+                    (self.source_expires_at is None or self.expires_at > self.source_expires_at))):
+            raise RegistryApiError("MANAGED_AUTHORITY_EXPIRED")
+
+
 @dataclass(frozen=True)
+class ResolvedRuntimeProfile:
+    upstreams: list[ResolvedRuntimeUpstream]
+    admission_required: bool
+
+
+@dataclass(frozen=True, repr=False)
 class ResolvedRuntimeUpstream:
     name: str
     config: UpstreamConfig
     server_name: str | None = None
+    managed: ManagedRuntime | None = None
 
 
 async def refresh_cli_session(
@@ -223,12 +301,15 @@ class RegistryApiClient:
         runtime_secret_resolver: RuntimeSecretResolver | None = None,
         *,
         runtime_files_connection_id: str | None = None,
+        report_receipt_observer: Callable[[ManagedRuntime], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.runtime_secret_resolver = runtime_secret_resolver
         self.runtime_files_connection_id = runtime_files_connection_id
+        self.report_receipt_observer = report_receipt_observer
         self._access_token: str | None = None
         self._tenant_id: str | None = None
+        self.runtime_client_id: str | None = None
 
     def _verify(self) -> str | bool:
         return self.config.resolved_ca_file() or True
@@ -278,26 +359,36 @@ class RegistryApiClient:
         return upstreams
 
     async def fetch_profile_upstreams(
-        self,
-        profile_name: str,
-        principal: Principal | None,
+        self, profile_name: str, principal: Principal | None,
     ) -> list[ResolvedRuntimeUpstream]:
-        headers = await self._authorization_headers()
-        url = self._api_url(f"/integrations/profiles/{profile_name}/servers")
-        params = {"include": "secrets"} if self.config.include_secrets else None
-        async with self._http_client() as client:
-            response = await client.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            payload = response.json()
-        servers = payload.get("servers") if isinstance(payload, dict) else None
+        return (await self.fetch_profile(profile_name, principal)).upstreams
+
+    async def fetch_profile(
+        self, profile_name: str, principal: Principal | None,
+    ) -> ResolvedRuntimeProfile:
+        started = monotonic()
+        payload = await self._fetch_profile_servers(profile_name, include_secrets=self.config.include_secrets)
+        servers = payload.get("servers")
         if not isinstance(servers, list):
             raise RegistryApiError("Registry profile servers response must include a servers array")
-
-        return [
-            await self._profile_server_to_upstream(item, profile_name, principal)
-            for item in servers
-            if isinstance(item, dict) and self._profile_server_enabled(item)
+        admission = self._admission_required(payload)
+        upstreams = [
+            await self._profile_server_to_upstream(item, profile_name, principal, started=started)
+            for item in servers if isinstance(item, dict) and self._profile_server_enabled(item)
         ]
+        return ResolvedRuntimeProfile(upstreams, admission)
+
+    @staticmethod
+    def _admission_required(payload: dict[str, Any]) -> bool:
+        admission = payload.get("organization_admission")
+        if admission is None:
+            return False  # Older APIs can serve legacy profiles only.
+        if not isinstance(admission, dict) or type(admission.get("required")) is not bool:
+            raise RegistryApiError("Registry organization admission is invalid")
+        return admission["required"]
+
+    async def fetch_profile_metadata(self, profile_name: str) -> dict[str, Any]:
+        return await self._fetch_profile_servers(profile_name, include_secrets=False)
 
     async def fetch_profile_upstream_names(self, profile_name: str) -> list[str]:
         payload = await self._fetch_profile_servers(profile_name, include_secrets=False)
@@ -320,14 +411,15 @@ class RegistryApiClient:
         alias: str,
         principal: Principal | None,
     ) -> ResolvedRuntimeUpstream:
-        payload = await self._fetch_profile_servers(profile_name, include_secrets=self.config.include_secrets)
+        started = monotonic()
+        payload = await self._fetch_profile_servers(profile_name, include_secrets=self.config.include_secrets, alias=alias)
         servers = payload.get("servers") if isinstance(payload, dict) else None
         if not isinstance(servers, list):
             raise RegistryApiError("Registry profile servers response must include a servers array")
 
         for item in servers:
             if isinstance(item, dict) and self._profile_server_enabled(item) and item.get("alias") == alias:
-                return await self._profile_server_to_upstream(item, profile_name, principal)
+                return await self._profile_server_to_upstream(item, profile_name, principal, started=started)
 
         raise RegistryApiError(f"Registry profile server {alias!r} is not available")
 
@@ -335,6 +427,112 @@ class RegistryApiClient:
     def _profile_server_enabled(item: dict[str, Any]) -> bool:
         client_config = item.get("client_config")
         return not (isinstance(client_config, dict) and client_config.get("enabled") is False)
+
+    async def authorize_inventory(
+        self, managed: ManagedRuntime, inventory: ToolInventory, original_tool_name: str | None = None,
+        *, observed: Callable[[str], None] | None = None, reported: Callable[[str], None] | None = None,
+    ) -> set[str]:
+        managed.assert_current()
+        headers = await self._authorization_headers()
+        base = self._api_url(f"/integrations/connections/{managed.connection_id}/tool-discoveries")
+        async with self._http_client() as client:
+            response = await client.post(base, headers=headers, json={
+                "profile": managed.profile, "assignment_id": str(managed.assignment_id),
+                "runtime_client_id": str(managed.runtime_client_id),
+            })
+            response.raise_for_status()
+            created = response.json()
+            try:
+                attempt_id = str(UUID(created["data"]["id"]))
+                etag = response.headers["ETag"]
+            except (KeyError, TypeError, ValueError):
+                raise RegistryApiError("INVALID_DISCOVERY_RESPONSE") from None
+        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name, observed=observed, reported=reported)
+
+    async def report_discovery(
+        self, managed: ManagedRuntime, attempt_id: str, etag: str, report: dict[str, Any],
+    ) -> dict[str, Any]:
+        managed.assert_current()
+        headers = await self._authorization_headers()
+        url = self._api_url(f"/integrations/connections/{managed.connection_id}/tool-discoveries/{UUID(attempt_id)}")
+        async with self._http_client() as client:
+            response = await client.put(url, headers={**headers, "If-Match": etag}, json={**report, "context_proof": managed.context_proof})
+            response.raise_for_status()
+            payload = response.json()
+        managed.assert_current()
+        if not isinstance(payload, dict):
+            raise RegistryApiError("INVALID_DISCOVERY_RESPONSE")
+        return payload
+
+    async def report_inventory(
+        self, managed: ManagedRuntime, inventory: ToolInventory, attempt_id: str, etag: str,
+        original_tool_name: str | None = None, *, observed: Callable[[str], None] | None = None,
+        reported: Callable[[str], None] | None = None,
+    ) -> set[str]:
+        report = {"status": "complete", "page_count": inventory.page_count, "duration_ms": inventory.duration_ms,
+                  "tools": [tool.model_dump(by_alias=True, mode="json", exclude_none=True) for tool in inventory.tools]}
+        if original_tool_name is not None:
+            report["original_tool_name"] = original_tool_name
+            if managed.reporting_proof is not None:
+                report["reporting_proof"] = managed.reporting_proof
+        authorization = (await self.report_discovery(managed, attempt_id, etag, report)).get("authorization")
+        if (not isinstance(authorization, dict) or authorization.get("schema_version") != 1
+                or type(authorization.get("expires_at")) is not int or authorization["expires_at"] != managed.expires_at
+                or not isinstance(authorization.get("allowed_tools"), list)
+                or not all(isinstance(name, str) for name in authorization["allowed_tools"])):
+            raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+        allowed = set(authorization["allowed_tools"])
+        if not allowed.issubset({tool.name for tool in inventory.tools}):
+            raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+        if observed is not None:
+            observed(attempt_id)
+        if original_tool_name is not None:
+            decision = authorization.get("requested_tool")
+            if not isinstance(decision, dict) or decision.get("name") != original_tool_name:
+                raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+            proof = authorization.get("reporting_proof")
+            if proof is not None and (not isinstance(proof, str) or not proof or len(proof) > 16384):
+                raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+            if decision.get("allowed") is not True or original_tool_name not in allowed:
+                reason = decision.get("reason_code")
+                if not isinstance(reason, str) or reason not in MANAGED_DENIAL_REASONS:
+                    raise RegistryApiError("INVALID_TOOL_AUTHORIZATION")
+                if proof is not None and reported is not None:
+                    reported(proof)
+                raise ManagedToolDenied(reason)
+            if proof is not None and reported is not None:
+                reported(proof)
+        managed.assert_current()
+        return allowed
+
+    async def managed_report_identity(self, *, refresh_tokens: bool = True) -> tuple[str, str, str]:
+        if not self.config.use_cli_session:
+            raise RegistryApiError("MANAGED_REPORT_SESSION_REQUIRED")
+        session = await self._cli_session(refresh_tokens=refresh_tokens)
+        claims = session.token_claims()
+        issuer, subject = claims.get("iss"), claims.get("sub")
+        if (not isinstance(issuer, str) or issuer.rstrip("/") != session.issuer.rstrip("/")
+                or not isinstance(subject, str) or not subject):
+            raise RegistryApiError("MANAGED_REPORT_SESSION_REQUIRED")
+        return self._api_url("/integrations/runtime-events"), issuer.rstrip("/"), subject
+
+    async def post_managed_runtime_event(self, payload: dict[str, Any], identity: tuple[str, str, str]) -> None:
+        # Re-read after refresh/account switches; never use the currently selected
+        # tenant to relabel historical facts. Registry derives it from the receipt.
+        if await self.managed_report_identity() != identity:
+            raise RegistryApiError("MANAGED_REPORT_SUBJECT_CHANGED")
+        session = await self._cli_session()
+        claims = session.token_claims()
+        if (claims.get("sub") != identity[2] or claims.get("iss", "").rstrip("/") != identity[1]):
+            raise RegistryApiError("MANAGED_REPORT_SUBJECT_CHANGED")
+        async with self._http_client() as client:
+            response = await client.post(identity[0], headers={"Authorization": f"Bearer {session.access_token}"}, json=payload)
+            response.raise_for_status()
+            record = response.json()
+            event = record.get("event") if isinstance(record, dict) else None
+            if (response.status_code != 201 or not isinstance(event, dict)
+                    or any(event.get(key) != payload[key] for key in ("schema_version", "id", "call_id", "phase"))):
+                raise RegistryApiError("INVALID_RUNTIME_REPORT_RESPONSE")
 
     async def post_runtime_event(self, payload: dict[str, Any]) -> None:
         headers = await self._authorization_headers()
@@ -360,10 +558,18 @@ class RegistryApiClient:
             raise RegistryApiError("Registry device heartbeat response must be a JSON object")
         return result
 
-    async def _fetch_profile_servers(self, profile_name: str, include_secrets: bool) -> dict[str, Any]:
+    async def _fetch_profile_servers(
+        self, profile_name: str, include_secrets: bool, *, alias: str | None = None,
+    ) -> dict[str, Any]:
         headers = await self._authorization_headers()
+        if include_secrets:
+            headers["X-LightNow-Runtime-Capabilities"] = MANAGED_CAPABILITY
+            if self.runtime_client_id is not None:
+                headers["X-LightNow-Runtime-Client"] = self.runtime_client_id
         url = self._api_url(f"/integrations/profiles/{profile_name}/servers")
-        params = {"include": "secrets"} if include_secrets else None
+        params = {"include": "secrets"} if include_secrets else {}
+        if alias is not None:
+            params["alias"] = alias
         async with self._http_client() as client:
             response = await client.get(url, headers=headers, params=params)
             response.raise_for_status()
@@ -377,12 +583,41 @@ class RegistryApiClient:
         item: dict[str, Any],
         profile_name: str,
         principal: Principal | None,
+        *, started: float | None = None,
     ) -> ResolvedRuntimeUpstream:
         alias = item.get("alias")
         server_name = item.get("server_name")
         status = item.get("status")
         if not isinstance(alias, str) or alias == "":
             raise RegistryApiError("Registry profile server is missing alias")
+        if "connection_id" in item:
+            managed_data = item.get("managed")
+            client_config = item.get("client_config")
+            if status != "linked" or not isinstance(managed_data, dict) or not isinstance(client_config, dict):
+                raise RegistryApiError("MANAGED_RUNTIME_NOT_READY")
+            try:
+                managed = ManagedRuntime.model_validate({**managed_data, "deadline": 0})
+                remaining = min(managed.expires_at - time(), managed.expires_at - managed.issued_at)
+                managed = managed.model_copy(update={"deadline": (started if started is not None else monotonic()) + max(0, remaining)})
+            except ValidationError:
+                raise RegistryApiError("INVALID_MANAGED_CONTEXT") from None
+            if (str(managed.runtime_client_id) != self.runtime_client_id or managed.profile != profile_name
+                    or str(managed.connection_id) != item.get("connection_id")
+                    or str(managed.assignment_id) != item.get("assignment_id")):
+                raise RegistryApiError("MANAGED_CONTEXT_MISMATCH")
+            managed.assert_current()
+            if self.report_receipt_observer is not None:
+                await self.report_receipt_observer(managed)
+            client_config = await self._resolve_profile_client_config(item, client_config)
+            managed.assert_current()
+            return ResolvedRuntimeUpstream(
+                name=alias,
+                config=self._profile_client_upstream_config(
+                    alias, client_config, runtime_files_root=self.config.resolved_runtime_files_dir(),
+                    runtime_files_namespace=self._runtime_files_namespace(profile_name, str(managed.connection_id), str(managed.assignment_id)),
+                ),
+                managed=managed,
+            )
         if not isinstance(server_name, str) or server_name == "":
             raise RegistryApiError(f"Registry profile server {alias!r} is missing server_name")
 
@@ -466,10 +701,12 @@ class RegistryApiClient:
     ) -> dict[str, Any]:
         """Overlay runtime-only secrets onto the canonical profile config."""
         context = item.get("context")
-        if self.runtime_secret_resolver is None or not isinstance(context, dict):
+        if not isinstance(context, dict):
             return client_config
         if not context.get("external_secret_bindings"):
             return client_config
+        if self.runtime_secret_resolver is None:
+            raise RegistryApiError("RUNTIME_SECRET_RESOLVER_REQUIRED")
 
         probe_request = context.get("probe_request")
         if not isinstance(probe_request, dict):
@@ -588,12 +825,12 @@ class RegistryApiClient:
             return {}
         return {"Authorization": f"Bearer {token}"}
 
-    async def _cli_session(self) -> "CliSession":
+    async def _cli_session(self, *, refresh_tokens: bool = True) -> "CliSession":
         configured_path = self.config.cli_session_path or self.config.cli_config_path
         path = Path(os.path.expanduser(configured_path))
         session = CliSession.load(path)
         self._validate_cli_session_binding(session)
-        if session.access_token_expired():
+        if refresh_tokens and session.access_token_expired():
             lock = _cli_session_file_lock(path, self.config.timeout_seconds)
             logger.info("waiting for CLI session refresh lock")
             try:

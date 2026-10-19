@@ -117,10 +117,12 @@ Runtime telemetry emits events for:
 
 When a CLI-generated Local Proxy configuration includes stable device and
 client-instance UUIDs, the proxy also sends one presence heartbeat at startup
-and every 120 seconds. The Registry API computes active presence with a
+and every 120 seconds (15 seconds for synchronized managed runtimes). The Registry API computes active presence with a
 300-second threshold. Heartbeat failures are logged and exposed through local
 status, but never block MCP traffic; the next regular heartbeat is the only
-retry. Disabling runtime telemetry disables both events and presence.
+retry. Disabling optional telemetry disables legacy activity and presence-only
+heartbeats. Synchronized managed runtimes retain their heartbeat and required
+call-evidence uploader independently of that preference.
 
 Events identify both the MCP end-client (`mcp_client_name`, for example
 `codex`) and the local process (`runner_name`, for example
@@ -190,3 +192,87 @@ and trailing slashes. Top-level paths such as `/lightnow-proxy-admins` therefore
 match `lightnow-proxy-admins`, but nested groups are not reduced to their final
 path segment. For example, `/team-a/admin` does not grant access to a profile
 requiring `/team-b/admin` or plain `admin`.
+
+## Required managed call evidence
+
+For an exact business-tool discovery, send the original report-only receipt to
+the existing discovery resource. A returned name-bound receipt replaces it only
+for subsequent call phases, preserving the original lifetime and context.
+Previously queued facts retain their IDs and content. The private call journal
+persists the bound receipt before dispatch, including for crash recovery, so
+late named evidence can be verified after the runtime observation is removed.
+This receipt cannot authorize execution or renew the original authority.
+
+After complete discovery and validation of the current tool authorization, the
+runtime queues the exact observation and its original short-lived context proof
+on the existing device heartbeat. This includes an applied empty/denied policy.
+At most 20 acknowledgements are sent per heartbeat; the private in-memory queue
+is bounded to 2,000 assignments. Expired authority is discarded with an explicit
+local status, never renewed. Missing or malformed server acknowledgement retains
+the original pending item; a response cannot remove a newer concurrent item.
+Status exposes only pending count and a closed error code. Acknowledgement
+confirms this runtime's validated policy, not refreshed menus in every AI client,
+business-call success, or a new execution grant. Deploy the supporting Registry
+API before releasing this client capability.
+
+Managed calls use Registry's existing `POST /integrations/runtime-events` v2
+contract (`registry-api/specs/managed-runtime-event.schema.json`). This is
+independent of optional activity capture and never includes arguments, results,
+credentials, transport URLs or raw errors. The encrypted reporting receipt is
+private local queue material; it is not an execution grant or an upstream
+attestation. Tool names require a completed private discovery observation.
+
+The proxy uses Python's native SQLite journal, with FULL synchronization and
+short transactions, under a private directory beside the CLI session. A managed
+call reserves bounded queue capacity and commits `attempted` before upstream
+startup, then `dispatch_started` after fresh authorization and immediately before
+the single business handoff. A received MCP response permits `dispatched` and
+`succeeded`/`upstream_failed`; transport loss after handoff is `outcome_unknown`.
+Pre-handoff infrastructure failures are `runtime_failed`; a tool-policy refusal
+is `denied`. No tool call is retried by this journal.
+
+Every call holds the existing native OS file lock for its UUID. Other proxy
+processes may share the journal, but cannot recover a live call. After an owner
+process exits, recovery records `runtime_failed` for pre-handoff calls or
+`outcome_unknown` after a committed handoff intent. It never invents success.
+Pending events retain their UUID, original receipt and actor/environment binding
+through every upload retry. Upload uses the same CLI subject/issuer and Registry
+API, without the currently selected tenant header; Registry derives the owner
+from the original receipt. Account changes cannot relabel queued events.
+
+A separate bounded uploader runs for synced local proxies even when optional
+telemetry or device presence is disabled. Delivery retries only immutable event
+uploads. Expired/rejected reports remain visible as unresolved queue items; they
+are not silently deleted. Queue corruption, missing receipts or exhausted local
+capacity blocks managed dispatch explicitly. The status endpoint exposes only
+counts and closed failure codes. The queue is limited to 2,000 unfinished calls,
+with at most four facts per call, and completed acknowledged calls are removed.
+
+A failed current-context lookup must not erase a managed attempt after a previous
+successful discovery. The private journal may retain only the separate report
+receipt, its delivery deadline and original actor/Registry/profile/assignment
+binding. Store this before external-secret resolution. On lookup failure, record
+an attempted/runtime-failed pair against that original reporting context, with no
+unverified tool name, while preserving the original execution error. This cache
+never supplies a runtime configuration, business lease or use grant. Changed
+accounts/issuers/Registry endpoints cannot borrow another receipt. Without an
+unexpired receipt, increment a durable local unattributed-attempt count instead
+of inventing an owner or reporting a successful call. Required evidence status
+exposes that gap. Receipt storage is separately bounded to 2,000 entries and
+expired receipts can be removed; pending event facts remain subject to their
+existing explicit-resolution policy.
+
+Before the first control-plane lookup, reserve a durable unattributed attempt.
+Transfer that reservation into the attributed call journal in the same SQLite
+transaction as its `attempted` fact. A process exit during lookup therefore
+leaves a visible unattributed gap. Completed attribution consumes exactly its
+own reservation; missing receipts and failed journal commits retain the gap.
+A currently missing assignment in a successfully fetched profile is an explicit
+assignment denial, distinct from an unavailable control plane.
+
+Multiple managed clients can share one CLI session and durable journal. Receipt
+cache keys additionally bind the native installation/client-instance coordinate;
+a control-plane outage on one client cannot borrow another client's receipt.
+The atomic SQLite cache migration retains old unbound receipts separately until
+expiry and preserves every queued fact. Missing own-client attribution remains
+an explicit gap. Neither cache lookup nor migration creates execution authority.

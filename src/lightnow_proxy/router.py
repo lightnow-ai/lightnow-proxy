@@ -11,20 +11,25 @@ import re
 from time import monotonic, time
 from typing import Any, Mapping
 from urllib.parse import quote, unquote
+from uuid import UUID
+
+import httpx
 
 from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemplate, TextContent, Tool
 
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
-from lightnow_proxy.registry import RegistryApiClient
+from lightnow_proxy.managed_events import EvidenceStoreError, ManagedEventOutbox
+from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, ManagedToolDenied, RegistryApiClient, RegistryApiError, managed_tool_namespace
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
-from lightnow_proxy.upstream import UpstreamMCPClient
+from lightnow_proxy.upstream import ToolDiscoveryError, ToolInventory, UpstreamMCPClient
 from lightnow_proxy.version_inventory import heartbeat_version_fields
 
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
+MANAGED_HEARTBEAT_INTERVAL_SECONDS = 15
 REDACTED_ARGUMENT_VALUE = "[REDACTED]"
 SENSITIVE_ARGUMENT_KEY_PARTS = {
     "apikey",
@@ -75,10 +80,11 @@ class RoutedResource:
     original_uri: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ProfileUpstream:
     config: UpstreamConfig
     server_name: str | None = None
+    managed: ManagedRuntime | None = None
 
 
 @dataclass
@@ -112,6 +118,7 @@ class ToolRouter:
             RegistryApiClient(
                 config.registry_api,
                 RuntimeSecretResolver(config.runtime_secrets),
+                report_receipt_observer=self._remember_reporter,
                 runtime_files_connection_id=(
                     str(config.local_proxy.connection_id)
                     if config.local_proxy.connection_id
@@ -125,6 +132,12 @@ class ToolRouter:
         self.device_heartbeat_last_attempt_at: datetime | None = None
         self.device_heartbeat_last_success_at: datetime | None = None
         self.device_heartbeat_last_error: str | None = None
+        self._discovery_tasks: dict[str, asyncio.Task[None]] = {}
+        self._managed_outbox: ManagedEventOutbox | None = None
+        self._managed_report_error: str | None = None
+        self._managed_upload_lock = asyncio.Lock()
+        self._managed_applications: dict[str, tuple[ManagedRuntime, str]] = {}
+        self._managed_application_error: str | None = None
 
     def update_client_context(
         self,
@@ -159,7 +172,7 @@ class ToolRouter:
             failures: list[tuple[str, Exception]] = []
             results = await asyncio.gather(
                 *[
-                    self._list_upstream_tools(upstream_name, upstream.config)
+                    self._list_upstream_tools(upstream_name, upstream)
                     for upstream_name, upstream in upstreams.items()
                 ]
             )
@@ -169,7 +182,7 @@ class ToolRouter:
                     logger.warning("failed to list tools for upstream %s: %s", upstream_name, unwrap_error(exc))
                     continue
                 for tool in upstream_tools:
-                    tools.append(prefix_tool(upstream_name, tool))
+                    tools.append(prefix_tool(upstream_name, tool, managed=upstreams[upstream_name].managed))
             tools.sort(key=lambda item: item.name)
             await self._emit_runtime_event(
                 {
@@ -210,10 +223,22 @@ class ToolRouter:
             raise
 
     async def _list_upstream_tools(
-        self, upstream_name: str, config: UpstreamConfig
+        self, upstream_name: str, upstream: ProfileUpstream
     ) -> tuple[str, list[Tool], Exception | None]:
         try:
-            return upstream_name, await self.upstream_client.list_tools(config), None
+            if upstream.managed is None:
+                return upstream_name, await self.upstream_client.list_tools(upstream.config), None
+            if self.registry_client is None:
+                raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
+            upstream.managed.assert_current()
+            async with self.upstream_client.session(upstream.config) as client:
+                inventory = await self.upstream_client.discover_tools(client)
+                observations: list[str] = []
+                allowed = await self.registry_client.authorize_inventory(upstream.managed, inventory, observed=observations.append)
+            upstream.managed.assert_current()
+            if observations:
+                self._queue_managed_application(upstream.managed, observations[-1])
+            return upstream_name, [tool for tool in inventory.tools if tool.name in allowed], None
         except Exception as exc:
             return upstream_name, [], exc
 
@@ -226,7 +251,7 @@ class ToolRouter:
 
     async def _measure_upstream_health(self, upstream_name: str, upstream: ProfileUpstream) -> UpstreamHealth:
         started = monotonic()
-        _, tools, exc = await self._list_upstream_tools(upstream_name, upstream.config)
+        _, tools, exc = await self._list_upstream_tools(upstream_name, upstream)
         duration_ms = self._duration_ms(started)
         if exc is not None:
             leaf = unwrap_error(exc)
@@ -255,7 +280,8 @@ class ToolRouter:
 
     def _tool_cache_path(self, profile_name: str) -> Path | None:
         local_proxy = self.config.local_proxy
-        if not local_proxy.enabled or not local_proxy.tool_cache_enabled:
+        if (not local_proxy.enabled or not local_proxy.tool_cache_enabled
+                or local_proxy.sync_from_lightnow):
             return None
         if local_proxy.tool_cache_path:
             return Path(local_proxy.tool_cache_path).expanduser()
@@ -309,9 +335,18 @@ class ToolRouter:
         started = monotonic()
         routed: RoutedTool | None = None
         upstream: ProfileUpstream | None = None
+        reserved = self.managed_events_enabled() and reserved_managed_namespace(proxied_tool_name.partition("__")[0])
         try:
-            routed, upstream = await self._call_target(profile_name, proxied_tool_name)
+            if reserved:
+                # Commit an unattributed attempt before any control-plane IO.
+                self._event_outbox().unattributed()
+            try:
+                routed, upstream = await self._call_target(profile_name, proxied_tool_name)
+            except BaseException as resolution_error:
+                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, resolution_error, reserved=reserved)
+                raise
             if upstream is None:
+                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, ToolRoutingError("MANAGED_RUNTIME_NOT_READY"), reserved=reserved)
                 result = CallToolResult(
                     content=[
                         TextContent(type="text", text=f"Tool {proxied_tool_name!r} is not available in this profile.")
@@ -329,7 +364,10 @@ class ToolRouter:
                     request_meta,
                 )
                 return result
-            result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {})
+            if upstream.managed is None:
+                result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {})
+            else:
+                result = await self._call_managed_tool(upstream, routed.original_name, arguments or {}, reserved=reserved)
             await self._emit_call_event(
                 profile_name,
                 proxied_tool_name,
@@ -356,13 +394,168 @@ class ToolRouter:
                     **runtime_request_metadata(
                         arguments,
                         request_meta,
-                        capture_arguments=self.config.local_proxy.capture_tool_arguments,
+                        capture_arguments=self.config.local_proxy.capture_tool_arguments and not ((upstream and upstream.managed) or reserved_managed_namespace(proxied_tool_name.partition("__")[0])),
                     ),
                     "error_type": error_type_name(exc),
-                    "error_message": error_message(exc),
+                    "error_message": None if reserved_managed_namespace(proxied_tool_name.partition("__")[0]) else error_message(exc),
                 }
             )
+            leaf = unwrap_error(exc)
+            if isinstance(leaf, EvidenceStoreError):
+                raise ToolRoutingError("EVIDENCE_STORE_UNAVAILABLE") from None
+            if isinstance(leaf, RegistryApiError) and str(leaf) in {
+                "MANAGED_TOOL_DENIED", "MANAGED_AUTHORITY_EXPIRED", "MANAGED_CONTEXT_MISMATCH",
+                "MANAGED_RUNTIME_NOT_READY", "INVALID_MANAGED_CONTEXT", "INVALID_TOOL_AUTHORIZATION", "MANAGED_ASSIGNMENT_UNAVAILABLE",
+            }:
+                # Expected managed decisions use the existing downstream MCP
+                # tool-error path, including through native SDK task groups.
+                raise ToolRoutingError(str(leaf)) from None
             raise
+
+    def managed_events_enabled(self) -> bool:
+        return bool(self.registry_client and self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow)
+
+    def _event_outbox(self) -> ManagedEventOutbox:
+        if self._managed_outbox is None:
+            if self.config.registry_api is None:
+                raise EvidenceStoreError()
+            session_path = self.config.registry_api.cli_session_path or self.config.registry_api.cli_config_path
+            local = self.config.local_proxy
+            runtime_key = (f"{local.device_installation_id}:{local.client_instance_id}"
+                           if local.device_installation_id and local.client_instance_id else
+                           f"runtime:{self.registry_client.runtime_client_id}" if self.registry_client and self.registry_client.runtime_client_id else "unregistered")
+            self._managed_outbox = ManagedEventOutbox(Path(session_path).expanduser().parent / "managed-runtime" / "events.sqlite3", runtime_key=runtime_key)
+        return self._managed_outbox
+
+    async def _remember_reporter(self, managed: ManagedRuntime) -> None:
+        if self.registry_client is None:
+            raise EvidenceStoreError()
+        identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
+        self._event_outbox().remember(managed, identity)
+
+    async def _record_unresolved_managed_attempt(self, profile: str, wire_name: str, error: BaseException, *, reserved: bool) -> None:
+        namespace = wire_name.partition("__")[0]
+        if not self.managed_events_enabled() or not reserved_managed_namespace(namespace) or self.registry_client is None:
+            return
+        outbox = self._event_outbox()
+        try:
+            identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
+        except RegistryApiError:
+            return
+        call = outbox.begin_cached(identity, profile, str(UUID(hex=namespace[3:])), reserved=reserved)
+        if call is None:
+            return
+        try:
+            leaf = unwrap_error(error)
+            phase = "runtime_failed"
+            code = "CONTROL_PLANE_UNAVAILABLE" if isinstance(leaf, httpx.HTTPError) else (
+                "MANAGED_CONTEXT_MISMATCH" if str(leaf) == "MANAGED_CONTEXT_MISMATCH" else "MANAGED_RUNTIME_NOT_READY")
+            if isinstance(leaf, RegistryApiError) and str(leaf) in {"MANAGED_AUTHORITY_EXPIRED", "MANAGED_ASSIGNMENT_UNAVAILABLE"}:
+                phase, code = "denied", "ASSIGNMENT_UNAVAILABLE" if str(leaf) == "MANAGED_ASSIGNMENT_UNAVAILABLE" else "MANAGED_AUTHORITY_EXPIRED"
+            if isinstance(leaf, httpx.HTTPStatusError):
+                try:
+                    body = leaf.response.json()
+                except ValueError:
+                    body = None
+                detail = body.get("error") if isinstance(body, dict) else None
+                if (leaf.response.status_code == 403 and isinstance(body, dict)
+                        and (body.get("status") == 403 or isinstance(detail, dict) and detail.get("code") in {"FORBIDDEN", "RUNTIME_PROFILE_FORBIDDEN"})):
+                    phase, code = "denied", "PROFILE_ACCESS_DENIED"
+                elif (leaf.response.status_code == 503 and isinstance(detail, dict)
+                        and detail.get("code") == "ORGANIZATION_ACCESS_UNAVAILABLE" and isinstance(detail.get("reason"), str) and detail.get("reason") in {
+                            "SOURCE_EXPIRED", "SOURCE_UNREACHABLE", "SOURCE_INVALID", "SOURCE_MISSING", "SOURCE_ROLLBACK", "SOURCE_RETIRED",
+                        }):
+                    code = detail["reason"]
+            outbox.record(call, phase, code)
+        finally:
+            call.release()
+
+    async def _call_managed_tool(self, upstream: ProfileUpstream, tool_name: str, arguments: dict[str, Any], *, reserved: bool = False) -> CallToolResult:
+        managed = upstream.managed
+        if self.registry_client is None or managed is None:
+            raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
+        identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
+        outbox = self._event_outbox()
+        call = outbox.begin(managed, identity, reserved=reserved)
+        try:
+            managed.assert_current()
+
+            async def authorize(inventory: ToolInventory) -> None:
+                def observed(observation_id: str) -> None:
+                    call.observation_id = observation_id
+                    if any(tool.name == tool_name for tool in inventory.tools):
+                        call.original_tool_name = tool_name
+
+                def reported(proof: str) -> None:
+                    call.reporting_proof = proof
+
+                try:
+                    await self.registry_client.authorize_inventory(managed, inventory, tool_name, observed=observed, reported=reported)
+                except ManagedToolDenied:
+                    if call.observation_id:
+                        self._queue_managed_application(managed, call.observation_id)
+                    raise
+                managed.assert_current()
+                if call.observation_id:
+                    self._queue_managed_application(managed, call.observation_id)
+                outbox.record(call, "dispatch_started")
+                try:
+                    managed.assert_current()
+                except RegistryApiError:
+                    call.handoff = False
+                    raise
+
+            result = await self.upstream_client.call_tool(upstream.config, tool_name, arguments, authorize=authorize)
+        except BaseException as exc:
+            leaf = unwrap_error(exc)
+            if call.handoff:
+                outbox.record(call, "outcome_unknown", "UPSTREAM_OUTCOME_UNKNOWN")
+            elif isinstance(leaf, RegistryApiError) and str(leaf) in {"MANAGED_TOOL_DENIED", "MANAGED_AUTHORITY_EXPIRED"}:
+                outbox.record(call, "denied", leaf.reason_code if isinstance(leaf, ManagedToolDenied) else str(leaf))
+            else:
+                code = str(leaf) if isinstance(leaf, RegistryApiError) and str(leaf) in {
+                    "MANAGED_CONTEXT_MISMATCH", "MANAGED_RUNTIME_NOT_READY",
+                } else "EVIDENCE_STORE_UNAVAILABLE" if isinstance(leaf, EvidenceStoreError) else "RUNTIME_START_FAILED"
+                if isinstance(leaf, httpx.HTTPError):
+                    code = "CONTROL_PLANE_UNAVAILABLE"
+                outbox.record(call, "runtime_failed", code)
+            raise
+        else:
+            outbox.record(call, "upstream_failed" if result.is_error else "succeeded", "UPSTREAM_FAILED" if result.is_error else None)
+            return result
+        finally:
+            call.release()
+
+    async def flush_managed_events(self) -> None:
+        if self.registry_client is None or self._managed_upload_lock.locked():
+            return
+        async with self._managed_upload_lock:
+            try:
+                identity = await self.registry_client.managed_report_identity()
+                outbox = self._event_outbox()
+                for event in outbox.pending(identity):
+                    try:
+                        await self.registry_client.post_managed_runtime_event(event, identity)
+                    except httpx.HTTPStatusError as exc:
+                        status = exc.response.status_code
+                        if status in {400, 403, 404, 409, 413, 422}:
+                            outbox.reject(event["id"], f"REPORT_REJECTED_{status}")
+                            continue
+                        raise
+                    outbox.acknowledge(event["id"])
+                self._managed_report_error = None
+            except Exception:
+                # Exception text can contain URLs, headers or private receipts.
+                self._managed_report_error = "REPORT_DELIVERY_UNAVAILABLE"
+
+    async def run_managed_event_loop(self) -> None:
+        while True:
+            await self.flush_managed_events()
+            await asyncio.sleep(5)
+
+    def managed_event_status(self) -> dict[str, Any]:
+        return {"enabled": self.managed_events_enabled(), **(self._managed_outbox.status() if self._managed_outbox else {}),
+                "delivery_error": self._managed_report_error}
 
     async def list_resources(self, profile_name: str) -> list[Resource]:
         started = monotonic()
@@ -372,6 +565,8 @@ class ToolRouter:
             failures: list[tuple[str, Exception]] = []
             for upstream_name, upstream in upstreams.items():
                 try:
+                    if upstream.managed is not None:
+                        raise ToolRoutingError("MANAGED_METHOD_NOT_AUTHORIZED")
                     upstream_resources = await self.upstream_client.list_resources(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
@@ -413,6 +608,8 @@ class ToolRouter:
             failures: list[tuple[str, Exception]] = []
             for upstream_name, upstream in upstreams.items():
                 try:
+                    if upstream.managed is not None:
+                        raise ToolRoutingError("MANAGED_METHOD_NOT_AUTHORIZED")
                     upstream_templates = await self.upstream_client.list_resource_templates(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
@@ -458,6 +655,8 @@ class ToolRouter:
             upstream = upstreams.get(routed.upstream_name)
             if upstream is None:
                 raise ToolRoutingError(f"Resource upstream {routed.upstream_name!r} is not available in this profile.")
+            if upstream.managed is not None:
+                raise ToolRoutingError("MANAGED_METHOD_NOT_AUTHORIZED")
             result = await self.upstream_client.read_resource(upstream.config, routed.original_uri)
             await self._emit_runtime_event(
                 {
@@ -514,41 +713,73 @@ class ToolRouter:
             raise ToolRoutingError(f"unknown profile: {profile_name}") from exc
 
     async def _call_target(
-        self, profile_name: str, proxied_tool_name: str
+        self, profile_name: str, proxied_tool_name: str,
     ) -> tuple[RoutedTool, ProfileUpstream | None]:
         profile = self._profile(profile_name)
-        upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
-
-        if profile.runtime_upstreams:
-            if self.registry_client is None:
-                raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
-            principal = get_current_principal()
-            for runtime_upstream in profile.runtime_upstreams:
-                resolved = await self.registry_client.resolve_upstream(runtime_upstream, principal)
-                upstreams[resolved.name] = ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
-
-        lightnow_names: list[str] = []
         if self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow:
             if self.registry_client is None:
                 raise ToolRoutingError("local proxy sync requires registry_api to be enabled")
-            lightnow_names = await self.registry_client.fetch_profile_upstream_names(profile_name)
-
-        routable_upstreams: dict[str, object] = {**self.config.upstreams}
-        routable_upstreams.update({name: None for name in lightnow_names})
-        routed = self.route_tool(proxied_tool_name, routable_upstreams)
-        upstream = upstreams.get(routed.upstream_name)
-        if upstream is not None:
-            return routed, upstream
-
-        if routed.upstream_name in lightnow_names:
-            resolved = await self.registry_client.fetch_profile_upstream(
-                profile_name,
-                routed.upstream_name,
-                get_current_principal(),
-            )
-            return routed, ProfileUpstream(config=resolved.config, server_name=resolved.server_name)
-
+            await self._ensure_runtime_registration()
+            payload = await self.registry_client.fetch_profile_metadata(profile_name)
+            servers = payload.get("servers")
+            if not isinstance(servers, list):
+                raise ToolRoutingError("INVALID_MANAGED_PROFILE")
+            names: dict[str, str] = {}
+            managed_names: set[str] = set()
+            managed_aliases: set[str] = set()
+            for item in servers:
+                if not isinstance(item, dict) or not isinstance(item.get("alias"), str) or not RegistryApiClient._profile_server_enabled(item):
+                    continue
+                alias = item["alias"]
+                if "connection_id" in item:
+                    namespace = managed_tool_namespace(item.get("assignment_id"))
+                    managed_names.add(namespace)
+                    managed_aliases.add(alias)
+                else:
+                    namespace = alias
+                    if reserved_managed_namespace(namespace):
+                        raise ToolRoutingError("RESERVED_MANAGED_TOOL_NAMESPACE")
+                if namespace in names:
+                    raise ToolRoutingError("DUPLICATE_PROFILE_TOOL_NAMESPACE")
+                names[namespace] = alias
+            required = RegistryApiClient._admission_required(payload)
+            routable = {name: None for name in names}
+            if not required:
+                routable.update({name: None for name in self.config.upstreams
+                                 if name not in managed_aliases and not reserved_managed_namespace(name)})
+                routable.update({item.name: None for item in profile.runtime_upstreams
+                                 if item.name not in managed_aliases and not reserved_managed_namespace(item.name)})
+            # Reserved UUID namespaces never fall back to a different instance,
+            # including local overrides after detachment or alias reuse.
+            namespace = proxied_tool_name.partition("__")[0]
+            if reserved_managed_namespace(namespace):
+                routable = {name: None for name in managed_names}
+                if namespace not in managed_names:
+                    raise RegistryApiError("MANAGED_ASSIGNMENT_UNAVAILABLE")
+            routed = self.route_tool(proxied_tool_name, routable)
+            if routed.upstream_name in names:
+                resolved = await self.registry_client.fetch_profile_upstream(profile_name, names[routed.upstream_name], get_current_principal())
+                if routed.upstream_name in managed_names and (resolved.managed is None or resolved.managed.tool_namespace != routed.upstream_name):
+                    raise ToolRoutingError("MANAGED_CONTEXT_MISMATCH")
+                return RoutedTool(resolved.name, routed.original_name), ProfileUpstream(config=resolved.config, server_name=resolved.server_name, managed=resolved.managed)
+            if required:
+                return routed, None
+        else:
+            routable = {**self.config.upstreams, **{item.name: None for item in profile.runtime_upstreams}}
+            routed = self.route_tool(proxied_tool_name, routable)
+        for runtime_upstream in profile.runtime_upstreams:
+            if runtime_upstream.name == routed.upstream_name:
+                if self.registry_client is None:
+                    raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
+                resolved = await self.registry_client.resolve_upstream(runtime_upstream, get_current_principal())
+                return routed, ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
+        if routed.upstream_name in profile.upstreams:
+            return routed, ProfileUpstream(config=self.config.upstreams[routed.upstream_name])
         return routed, None
+
+    async def _ensure_runtime_registration(self) -> None:
+        if self.device_heartbeat_enabled() and self.device_heartbeat_last_success_at is None:
+            await self.send_device_heartbeat()
 
     async def _profile_upstreams(self, profile_name: str) -> dict[str, UpstreamConfig]:
         return {
@@ -557,26 +788,30 @@ class ToolRouter:
 
     async def _profile_upstream_details(self, profile_name: str) -> dict[str, ProfileUpstream]:
         profile = self._profile(profile_name)
-        upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
-
-        if profile.runtime_upstreams:
-            if self.registry_client is None:
-                raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
-            principal = get_current_principal()
-            for runtime_upstream in profile.runtime_upstreams:
-                resolved = await self.registry_client.resolve_upstream(runtime_upstream, principal)
-                upstreams[resolved.name] = ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
-
+        canonical: dict[str, ProfileUpstream] = {}
         if self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow:
             if self.registry_client is None:
                 raise ToolRoutingError("local proxy sync requires registry_api to be enabled")
-            principal = get_current_principal()
-            for resolved in await self.registry_client.fetch_profile_upstreams(profile_name, principal):
-                upstreams[resolved.name] = ProfileUpstream(
-                    config=resolved.config,
-                    server_name=resolved.server_name,
-                )
-
+            await self._ensure_runtime_registration()
+            resolved_profile = await self.registry_client.fetch_profile(profile_name, get_current_principal())
+            canonical = {item.name: ProfileUpstream(config=item.config, server_name=item.server_name, managed=item.managed)
+                         for item in resolved_profile.upstreams}
+            if resolved_profile.admission_required:
+                return canonical
+        if self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow and (
+            any(reserved_managed_namespace(name) for name in profile.upstreams)
+            or any(reserved_managed_namespace(item.name) for item in profile.runtime_upstreams)
+        ):
+            raise ToolRoutingError("RESERVED_MANAGED_TOOL_NAMESPACE")
+        upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
+        for runtime_upstream in profile.runtime_upstreams:
+            if runtime_upstream.name in canonical:
+                continue
+            if self.registry_client is None:
+                raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
+            resolved = await self.registry_client.resolve_upstream(runtime_upstream, get_current_principal())
+            upstreams[resolved.name] = ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
+        upstreams.update(canonical)
         return upstreams
 
     async def _emit_call_event(
@@ -604,7 +839,7 @@ class ToolRouter:
                 **runtime_request_metadata(
                     arguments,
                     request_meta,
-                    capture_arguments=self.config.local_proxy.capture_tool_arguments,
+                    capture_arguments=self.config.local_proxy.capture_tool_arguments and not ((upstream and upstream.managed) or reserved_managed_namespace(proxied_tool_name.partition("__")[0])),
                 ),
                 "upstream_transport": upstream.config.transport if upstream else None,
                 "response_items_count": len(result.content),
@@ -652,7 +887,7 @@ class ToolRouter:
         """Return whether this observed Local Proxy has enough data to report presence."""
         return bool(
             self.config.local_proxy.enabled
-            and self.config.local_proxy.telemetry_enabled
+            and (self.config.local_proxy.telemetry_enabled or self.config.local_proxy.sync_from_lightnow)
             and self.registry_client is not None
             and self.config.local_proxy.device_installation_id
             and self.config.local_proxy.client_instance_id
@@ -666,6 +901,7 @@ class ToolRouter:
         local_proxy = self.config.local_proxy
         self.device_heartbeat_last_attempt_at = datetime.now(UTC)
         device_versions, runner_versions = heartbeat_version_fields(local_proxy)
+        applications = self._pending_managed_applications() if local_proxy.sync_from_lightnow else {}
         payload = {
             "device": {
                 "reported_hostname": local_proxy.device_hostname,
@@ -676,6 +912,9 @@ class ToolRouter:
                 "name": self.client_context.name or local_proxy.client_name,
                 "version": self.client_context.version or local_proxy.client_version,
                 "profile": local_proxy.profile,
+                **({"managed_capabilities": [MANAGED_CAPABILITY]} if local_proxy.sync_from_lightnow else {}),
+                **({"managed_applications": [{"observation_id": observation, "context_proof": managed.context_proof}
+                                              for managed, observation in applications.values()]} if applications else {}),
                 "runner_name": local_proxy.runner_name,
                 "runner_version": __version__,
                 **runner_versions,
@@ -683,11 +922,18 @@ class ToolRouter:
             },
         }
         try:
-            await self.registry_client.post_device_heartbeat(
+            result = await self.registry_client.post_device_heartbeat(
                 str(local_proxy.device_installation_id),
                 str(local_proxy.client_instance_id),
                 payload,
             )
+            for client in result.get("device", {}).get("clients", []):
+                if client.get("client_instance_id") == str(local_proxy.client_instance_id):
+                    self.registry_client.runtime_client_id = str(UUID(client["id"]))
+            if local_proxy.sync_from_lightnow and self.registry_client.runtime_client_id is not None:
+                if applications:
+                    self._acknowledge_managed_applications(applications, result.get("managed_application_acks"))
+                self._schedule_discoveries(result.get("managed_discovery_requests"))
         except Exception as exc:
             self.device_heartbeat_last_error = error_message(exc)
             logger.warning("failed to post LightNow device heartbeat: %s", exc)
@@ -699,15 +945,141 @@ class ToolRouter:
 
     async def run_device_heartbeat_loop(self) -> None:
         """Send immediately, then let each regular interval serve as the only retry."""
-        while True:
-            await self.send_device_heartbeat()
-            await asyncio.sleep(DEVICE_HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            while True:
+                await self.send_device_heartbeat()
+                await asyncio.sleep(self._heartbeat_interval())
+        finally:
+            tasks = list(self._discovery_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _heartbeat_interval(self) -> int:
+        return MANAGED_HEARTBEAT_INTERVAL_SECONDS if self.config.local_proxy.sync_from_lightnow else DEVICE_HEARTBEAT_INTERVAL_SECONDS
+
+    def _schedule_discoveries(self, requests: Any) -> None:
+        if not isinstance(requests, list):
+            return
+        for request in requests[:20]:
+            if len(self._discovery_tasks) >= 2:
+                break
+            if not isinstance(request, dict) or request.get("profile") != self.config.local_proxy.profile:
+                continue
+            try:
+                attempt_id = str(UUID(request["id"]))
+                if request.get("runtime_client_id") != self.registry_client.runtime_client_id:
+                    continue
+                expires = datetime.fromisoformat(request["expires_at"])
+                if expires.tzinfo is None or expires <= datetime.now(UTC) or request.get("status") not in {"queued", "discovering"}:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            if attempt_id not in self._discovery_tasks:
+                task = asyncio.create_task(self._run_discovery(request), name="lightnow-private-discovery")
+                self._discovery_tasks[attempt_id] = task
+                task.add_done_callback(lambda _task, key=attempt_id: self._discovery_tasks.pop(key, None))
+
+    async def _run_discovery(self, request: dict[str, Any]) -> None:
+        """A queue entry selects work, never authority or a substitute request."""
+        if self.registry_client is None:
+            return
+        try:
+            profile = self.config.local_proxy.profile
+            metadata = await self.registry_client.fetch_profile_metadata(profile)
+            assignment = next((item for item in metadata.get("servers", []) if isinstance(item, dict)
+                               and item.get("assignment_id") == request.get("assignment_id")
+                               and item.get("connection_id") == request.get("connection_id")), None)
+            if assignment is None or not isinstance(assignment.get("alias"), str):
+                return
+            resolved = await self.registry_client.fetch_profile_upstream(profile, assignment["alias"], None)
+            managed = resolved.managed
+            if managed is None:
+                return
+            for field in ("connection_id", "connection_revision", "profile_id", "profile_revision", "policy_revision", "profile",
+                          "assignment_id", "assignment_revision", "runtime_client_id", "credential_binding_id", "credential_revision"):
+                value = getattr(managed, field)
+                if isinstance(value, UUID):
+                    value = str(value)
+                if field not in request or value != request[field]:
+                    return
+            if not isinstance(request.get("etag"), str):
+                return
+            expires = datetime.fromisoformat(request["expires_at"])
+            if expires.tzinfo is None or expires <= datetime.now(UTC):
+                return
+            managed.assert_current()
+            started = monotonic()
+            try:
+                async with asyncio.timeout(30):
+                    async with self.upstream_client.session(resolved.config) as client:
+                        inventory = await self.upstream_client.discover_tools(client)
+            except Exception as exc:
+                leaf = unwrap_error(exc)
+                diagnostic = diagnostic_for_exception(leaf)
+                if isinstance(leaf, ToolDiscoveryError):
+                    status, reason = "partial", leaf.reason_code
+                else:
+                    status, reason = {
+                        "configuration": ("configuration_required", "CONFIGURATION_REQUIRED"),
+                        "authentication": ("authentication_required", "AUTHENTICATION_REQUIRED"),
+                        "authorization": ("authentication_required", "AUTHENTICATION_REQUIRED"),
+                        "timeout": ("partial", "DISCOVERY_TIMED_OUT"),
+                        "runtime": ("startup_failed", "RUNTIME_START_FAILED"),
+                    }.get(diagnostic.kind, ("connection_failed", "CONNECTION_FAILED"))
+                await self.registry_client.report_discovery(managed, request["id"], request["etag"], {
+                    "status": status, "reason_code": reason, "page_count": 0,
+                    "duration_ms": min(30000, self._duration_ms(started)),
+                })
+                return
+            await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"])
+            self._queue_managed_application(managed, request["id"])
+        except Exception:
+            # No untrusted tool metadata, URLs, credentials or raw errors in logs.
+            logger.warning("private discovery could not be reported under current authority")
+
+    def _queue_managed_application(self, managed: ManagedRuntime, observation: str) -> None:
+        managed.assert_current()
+        observation = str(UUID(observation))
+        key = str(managed.assignment_id)
+        self._pending_managed_applications()
+        if key not in self._managed_applications and len(self._managed_applications) >= 2000:
+            raise RegistryApiError("MANAGED_APPLICATION_CAPACITY_EXCEEDED")
+        self._managed_applications[key] = (managed, observation)
+
+    def _pending_managed_applications(self) -> dict[str, tuple[ManagedRuntime, str]]:
+        for key, (managed, _) in list(self._managed_applications.items()):
+            try:
+                managed.assert_current()
+            except RegistryApiError:
+                del self._managed_applications[key]
+                self._managed_application_error = "MANAGED_APPLICATION_EXPIRED"
+        return dict(list(self._managed_applications.items())[:20])
+
+    def _acknowledge_managed_applications(self, sent: dict[str, tuple[ManagedRuntime, str]], response: Any) -> None:
+        codes = {"OBSERVATION_UNAVAILABLE", "OBSERVATION_INCOMPLETE", "OBSERVATION_UNBOUND", "CONTEXT_CHANGED",
+                 "ACCESS_DENIED", "CAPACITY_EXCEEDED", "RUNTIME_INCOMPATIBLE"}
+        expected = {observation for _, observation in sent.values()}
+        if (not isinstance(response, list) or len(response) != len(expected)
+                or any(not isinstance(item, dict) or not isinstance(item.get("observation_id"), str)
+                       or item.get("observation_id") not in expected
+                       or item.get("status") not in ("accepted", "rejected")
+                       or (item.get("status") == "accepted" and item.get("code") is not None)
+                       or (item.get("status") == "rejected" and (not isinstance(item.get("code"), str)
+                                                                 or item.get("code") not in codes)) for item in response)
+                or {item["observation_id"] for item in response} != expected):
+            self._managed_application_error = "INVALID_MANAGED_APPLICATION_ACK"
+            return
+        self._managed_application_error = next((item["code"] for item in response if item["status"] == "rejected"), None)
+        for key, application in sent.items():
+            if self._managed_applications.get(key) == application:
+                del self._managed_applications[key]
 
     def device_heartbeat_status(self) -> dict[str, Any]:
         """Return non-secret local diagnostics for the last heartbeat attempt."""
         return {
             "enabled": self.device_heartbeat_enabled(),
-            "interval_seconds": DEVICE_HEARTBEAT_INTERVAL_SECONDS,
+            "interval_seconds": self._heartbeat_interval(),
             "last_attempt_at": self.device_heartbeat_last_attempt_at.isoformat()
             if self.device_heartbeat_last_attempt_at
             else None,
@@ -715,6 +1087,8 @@ class ToolRouter:
             if self.device_heartbeat_last_success_at
             else None,
             "last_error": self.device_heartbeat_last_error,
+            "managed_applications_pending": len(self._managed_applications),
+            "managed_application_error": self._managed_application_error,
         }
 
     async def emit_lifecycle_event(self, event_type: str, status: str = "success") -> None:
@@ -753,15 +1127,23 @@ class ToolRouter:
         return "; ".join(f"{name}: {error_type_name(exc)}" for name, exc in failures)[:500]
 
 
-def prefix_tool(upstream_name: str, tool: Tool) -> Tool:
+def reserved_managed_namespace(value: str) -> bool:
+    return re.fullmatch(r"ln_[0-9a-f]{32}", value.partition("__")[0]) is not None
+
+
+def prefix_tool(upstream_name: str, tool: Tool, *, managed: ManagedRuntime | None = None) -> Tool:
     data = tool.model_dump(exclude_none=True, by_alias=True)
     data = copy.deepcopy(data)
-    data["name"] = f"{upstream_name}__{tool.name}"
+    namespace = managed.tool_namespace if managed is not None else upstream_name
+    data["name"] = f"{namespace}__{tool.name}"
     description = data.get("description") or ""
     data["description"] = f"[{upstream_name}] {description}".strip()
     meta = dict(data.get("_meta") or {})
     meta["lightnow_proxy_upstream"] = upstream_name
     meta["lightnow_proxy_original_name"] = tool.name
+    if managed is not None:
+        meta["lightnow_proxy_connection_id"] = str(managed.connection_id)
+        meta["lightnow_proxy_assignment_id"] = str(managed.assignment_id)
     data["_meta"] = meta
     return Tool.model_validate(data)
 

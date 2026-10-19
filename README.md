@@ -38,6 +38,53 @@ The proxy supports the official MCP `2026-07-28` revision with stateless,
 per-request protocol metadata and `server/discover`. It keeps automatic
 compatibility with handshake-era servers and clients through `2025-11-25`.
 
+Tool discovery reads complete pagination from the actual configured upstream.
+It fails explicitly on repeated cursors, duplicate exact names or limits of
+30 seconds, 100 pages, 2,000 tools and 4 MiB of definitions. A complete empty
+inventory stays distinct from incomplete discovery. Modern HTTP calls prepare
+their parameter-header schemas from that same fully discovered client.
+The managed dispatch primitive authorizes that inventory before sending once;
+schema-mismatch recovery and interactive retries must return to its policy gate.
+
+For managed connections the existing device heartbeat declares
+`managed-connections.v1` and obtains the actor-owned runtime client ID, even when
+optional activity capture is disabled.
+Compatible synchronized proxies poll every 15 seconds and execute at most two
+queued private discoveries concurrently. They resolve the exact current assignment,
+compare queued profile, policy and credential revisions before opening the upstream,
+and report to the original request with If-Match. Shutdown cancels outstanding
+discovery work; failures report bounded codes without private definitions or raw
+upstream errors. Legacy presence-only clients retain the 120-second interval.
+Registry supplies the canonical connection, assignment and bounded bootstrap context. Complete private inventory reporting
+returns exact allowed original names from the same backend authorizer as dispatch.
+The Proxy filters discovery and checks that decision again on the actual upstream
+session before one business call. Expected managed denials return a normal MCP tool
+error containing a content-free reason code. Absolute expiry and a monotonic deadline both
+apply; reporting does not renew the lease. Managed contexts do not authorize
+resource methods. Synchronized profiles bypass persistent tool caches and stale
+fallbacks. Canonical aliases take precedence; required organization admission also
+excludes local static and legacy runtime overrides from the managed profile.
+Managed wire names use `ln_<full assignment UUID hex>__<original tool name>`.
+Descriptions and metadata retain readable aliases. Aliases containing underscores,
+renames, and replacement assignments therefore cannot transfer tool identity.
+The reserved UUID namespace cannot fall back to static/legacy routing after an
+assignment is removed; ordinary legacy tool names retain their existing form.
+
+Managed calls also retain content-free required evidence independently of optional
+activity capture. A private SQLite journal beside the CLI session commits each
+attempt before startup and handoff intent before dispatch. It retries only the
+original event UUIDs, subject and reporting receipt; it never retries a business
+call. Native OS locks distinguish live calls from interrupted ones. Lost outcomes
+stay unknown. The Registry's explicit `RUNTIME_PROFILE_FORBIDDEN` response records
+a denied call using its original reporting receipt; it is not an infrastructure
+outage. Unavailable storage or exhausted capacity blocks dispatch. Local
+`/status` exposes pending/unresolved counts and closed delivery codes. The bounded
+journal retains rejected/expired facts for explicit resolution. See
+[the evidence contract](docs/ARCHITECTURE.md#required-managed-call-evidence).
+
+
+
+
 ## Install
 
 Requirements:

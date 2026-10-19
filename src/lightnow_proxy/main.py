@@ -135,6 +135,8 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
             task_group.start_soon(forward_messages)
             if router.device_heartbeat_enabled():
                 task_group.start_soon(router.run_device_heartbeat_loop)
+            if router.managed_events_enabled():
+                task_group.start_soon(router.run_managed_event_loop)
             await router.emit_lifecycle_event("runner_started")
             try:
                 await server.run(
