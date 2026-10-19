@@ -111,9 +111,9 @@ def sanitized_setup_preview(template: Any, resolved_inputs: Any) -> dict[str, An
             definition = declarations[item.input_id]
             kind = _kind(definition)
             if item.file_binding:
-                if not item.provided or kind not in {"path", "secret"}:
+                if not item.provided or kind not in {"string", "path", "secret"}:
                     return None
-                if kind == "path":
+                if kind != "secret":
                     kind = "file"
             entry = {"input_id": item.input_id, "provided": item.provided, "value_kind": kind}
             choice = item.public_choice_index

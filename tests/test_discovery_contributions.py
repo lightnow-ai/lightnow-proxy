@@ -77,7 +77,7 @@ def test_malformed_or_incomplete_bindings_are_unshareable(setup, mutation):
     elif mutation == "bad_choice":
         bound["inputs"][0]["public_choice_index"] = True
     else:
-        bound["inputs"][2]["file_binding"] = True
+        bound["inputs"][2].update(file_binding=True, provided=False)
     assert sanitized_setup_preview(template, bound) is None
 
 
@@ -121,6 +121,13 @@ def test_secret_file_bindings_remain_secret_placeholders(setup):
     bound["inputs"][0]["file_binding"] = True
     preview = sanitized_setup_preview(template, bound)
     assert preview["inputs"][0] == {"input_id": "env:0", "provided": True, "value_kind": "secret"}
+
+
+def test_a_native_staged_file_binding_is_not_misreported_as_a_public_string_choice(setup):
+    template, bound = setup
+    bound["inputs"][2]["file_binding"] = True
+    preview = sanitized_setup_preview(template, bound)
+    assert preview["inputs"][2] == {"input_id": "package_argument:1", "provided": True, "value_kind": "file"}
 
 
 def test_unknown_or_oversized_templates_never_fabricate_a_preview(setup):
