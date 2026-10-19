@@ -337,6 +337,8 @@ async def test_unresolved_managed_attempt_never_captures_arguments_or_raw_errors
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,body,phase,reason", [
     (403, {"status": 403, "message": "private denial detail"}, "denied", "PROFILE_ACCESS_DENIED"),
+    (403, {"error": {"code": "RUNTIME_PROFILE_FORBIDDEN", "message": "private profile detail"}}, "denied", "PROFILE_ACCESS_DENIED"),
+    (403, {"error": {"code": "UNRELATED_FORBIDDEN"}}, "runtime_failed", "CONTROL_PLANE_UNAVAILABLE"),
     (503, {"error": {"code": "ORGANIZATION_ACCESS_UNAVAILABLE", "reason": "SOURCE_EXPIRED"}}, "runtime_failed", "SOURCE_EXPIRED"),
 ])
 async def test_report_only_receipt_retains_original_context_for_closed_control_plane_decisions(tmp_path, status, body, phase, reason):

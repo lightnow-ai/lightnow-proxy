@@ -459,7 +459,7 @@ class ToolRouter:
                     body = None
                 detail = body.get("error") if isinstance(body, dict) else None
                 if (leaf.response.status_code == 403 and isinstance(body, dict)
-                        and (body.get("status") == 403 or isinstance(detail, dict) and detail.get("code") == "FORBIDDEN")):
+                        and (body.get("status") == 403 or isinstance(detail, dict) and detail.get("code") in {"FORBIDDEN", "RUNTIME_PROFILE_FORBIDDEN"})):
                     phase, code = "denied", "PROFILE_ACCESS_DENIED"
                 elif (leaf.response.status_code == 503 and isinstance(detail, dict)
                         and detail.get("code") == "ORGANIZATION_ACCESS_UNAVAILABLE" and isinstance(detail.get("reason"), str) and detail.get("reason") in {

@@ -75,7 +75,9 @@ activity capture. A private SQLite journal beside the CLI session commits each
 attempt before startup and handoff intent before dispatch. It retries only the
 original event UUIDs, subject and reporting receipt; it never retries a business
 call. Native OS locks distinguish live calls from interrupted ones. Lost outcomes
-stay unknown; unavailable storage or exhausted capacity blocks dispatch. Local
+stay unknown. The Registry's explicit `RUNTIME_PROFILE_FORBIDDEN` response records
+a denied call using its original reporting receipt; it is not an infrastructure
+outage. Unavailable storage or exhausted capacity blocks dispatch. Local
 `/status` exposes pending/unresolved counts and closed delivery codes. The bounded
 journal retains rejected/expired facts for explicit resolution. See
 [the evidence contract](docs/ARCHITECTURE.md#required-managed-call-evidence).
