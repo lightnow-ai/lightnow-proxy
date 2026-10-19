@@ -11,16 +11,17 @@ import re
 from time import monotonic, time
 from typing import Any, Mapping
 from urllib.parse import quote, unquote
+from uuid import UUID
 
 from mcp.types import CallToolResult, ReadResourceResult, Resource, ResourceTemplate, TextContent, Tool
 
 from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
-from lightnow_proxy.registry import RegistryApiClient
+from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, RegistryApiClient
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
-from lightnow_proxy.upstream import UpstreamMCPClient
+from lightnow_proxy.upstream import ToolInventory, UpstreamMCPClient
 from lightnow_proxy.version_inventory import heartbeat_version_fields
 
 logger = logging.getLogger(__name__)
@@ -75,10 +76,11 @@ class RoutedResource:
     original_uri: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ProfileUpstream:
     config: UpstreamConfig
     server_name: str | None = None
+    managed: ManagedRuntime | None = None
 
 
 @dataclass
@@ -159,7 +161,7 @@ class ToolRouter:
             failures: list[tuple[str, Exception]] = []
             results = await asyncio.gather(
                 *[
-                    self._list_upstream_tools(upstream_name, upstream.config)
+                    self._list_upstream_tools(upstream_name, upstream)
                     for upstream_name, upstream in upstreams.items()
                 ]
             )
@@ -210,10 +212,19 @@ class ToolRouter:
             raise
 
     async def _list_upstream_tools(
-        self, upstream_name: str, config: UpstreamConfig
+        self, upstream_name: str, upstream: ProfileUpstream
     ) -> tuple[str, list[Tool], Exception | None]:
         try:
-            return upstream_name, await self.upstream_client.list_tools(config), None
+            if upstream.managed is None:
+                return upstream_name, await self.upstream_client.list_tools(upstream.config), None
+            if self.registry_client is None:
+                raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
+            upstream.managed.assert_current()
+            async with self.upstream_client.session(upstream.config) as client:
+                inventory = await self.upstream_client.discover_tools(client)
+                allowed = await self.registry_client.authorize_inventory(upstream.managed, inventory)
+            upstream.managed.assert_current()
+            return upstream_name, [tool for tool in inventory.tools if tool.name in allowed], None
         except Exception as exc:
             return upstream_name, [], exc
 
@@ -226,7 +237,7 @@ class ToolRouter:
 
     async def _measure_upstream_health(self, upstream_name: str, upstream: ProfileUpstream) -> UpstreamHealth:
         started = monotonic()
-        _, tools, exc = await self._list_upstream_tools(upstream_name, upstream.config)
+        _, tools, exc = await self._list_upstream_tools(upstream_name, upstream)
         duration_ms = self._duration_ms(started)
         if exc is not None:
             leaf = unwrap_error(exc)
@@ -255,7 +266,8 @@ class ToolRouter:
 
     def _tool_cache_path(self, profile_name: str) -> Path | None:
         local_proxy = self.config.local_proxy
-        if not local_proxy.enabled or not local_proxy.tool_cache_enabled:
+        if (not local_proxy.enabled or not local_proxy.tool_cache_enabled
+                or local_proxy.sync_from_lightnow):
             return None
         if local_proxy.tool_cache_path:
             return Path(local_proxy.tool_cache_path).expanduser()
@@ -329,7 +341,18 @@ class ToolRouter:
                     request_meta,
                 )
                 return result
-            result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {})
+            if upstream.managed is None:
+                result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {})
+            else:
+                if self.registry_client is None:
+                    raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
+                upstream.managed.assert_current()
+
+                async def authorize(inventory: ToolInventory) -> None:
+                    await self.registry_client.authorize_inventory(upstream.managed, inventory, routed.original_name)
+                    upstream.managed.assert_current()
+
+                result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {}, authorize=authorize)
             await self._emit_call_event(
                 profile_name,
                 proxied_tool_name,
@@ -356,7 +379,7 @@ class ToolRouter:
                     **runtime_request_metadata(
                         arguments,
                         request_meta,
-                        capture_arguments=self.config.local_proxy.capture_tool_arguments,
+                        capture_arguments=self.config.local_proxy.capture_tool_arguments and not (upstream and upstream.managed),
                     ),
                     "error_type": error_type_name(exc),
                     "error_message": error_message(exc),
@@ -372,6 +395,8 @@ class ToolRouter:
             failures: list[tuple[str, Exception]] = []
             for upstream_name, upstream in upstreams.items():
                 try:
+                    if upstream.managed is not None:
+                        raise ToolRoutingError("MANAGED_METHOD_NOT_AUTHORIZED")
                     upstream_resources = await self.upstream_client.list_resources(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
@@ -413,6 +438,8 @@ class ToolRouter:
             failures: list[tuple[str, Exception]] = []
             for upstream_name, upstream in upstreams.items():
                 try:
+                    if upstream.managed is not None:
+                        raise ToolRoutingError("MANAGED_METHOD_NOT_AUTHORIZED")
                     upstream_templates = await self.upstream_client.list_resource_templates(upstream.config)
                 except Exception as exc:
                     failures.append((upstream_name, exc))
@@ -458,6 +485,8 @@ class ToolRouter:
             upstream = upstreams.get(routed.upstream_name)
             if upstream is None:
                 raise ToolRoutingError(f"Resource upstream {routed.upstream_name!r} is not available in this profile.")
+            if upstream.managed is not None:
+                raise ToolRoutingError("MANAGED_METHOD_NOT_AUTHORIZED")
             result = await self.upstream_client.read_resource(upstream.config, routed.original_uri)
             await self._emit_runtime_event(
                 {
@@ -514,41 +543,48 @@ class ToolRouter:
             raise ToolRoutingError(f"unknown profile: {profile_name}") from exc
 
     async def _call_target(
-        self, profile_name: str, proxied_tool_name: str
+        self, profile_name: str, proxied_tool_name: str,
     ) -> tuple[RoutedTool, ProfileUpstream | None]:
         profile = self._profile(profile_name)
-        upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
-
-        if profile.runtime_upstreams:
-            if self.registry_client is None:
-                raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
-            principal = get_current_principal()
-            for runtime_upstream in profile.runtime_upstreams:
-                resolved = await self.registry_client.resolve_upstream(runtime_upstream, principal)
-                upstreams[resolved.name] = ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
-
-        lightnow_names: list[str] = []
         if self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow:
             if self.registry_client is None:
                 raise ToolRoutingError("local proxy sync requires registry_api to be enabled")
-            lightnow_names = await self.registry_client.fetch_profile_upstream_names(profile_name)
-
-        routable_upstreams: dict[str, object] = {**self.config.upstreams}
-        routable_upstreams.update({name: None for name in lightnow_names})
-        routed = self.route_tool(proxied_tool_name, routable_upstreams)
-        upstream = upstreams.get(routed.upstream_name)
-        if upstream is not None:
-            return routed, upstream
-
-        if routed.upstream_name in lightnow_names:
-            resolved = await self.registry_client.fetch_profile_upstream(
-                profile_name,
-                routed.upstream_name,
-                get_current_principal(),
-            )
-            return routed, ProfileUpstream(config=resolved.config, server_name=resolved.server_name)
-
+            await self._ensure_runtime_registration()
+            payload = await self.registry_client.fetch_profile_metadata(profile_name)
+            servers = payload.get("servers")
+            if not isinstance(servers, list):
+                raise ToolRoutingError("INVALID_MANAGED_PROFILE")
+            names = {item["alias"] for item in servers if isinstance(item, dict) and isinstance(item.get("alias"), str)
+                     and RegistryApiClient._profile_server_enabled(item)}
+            required = RegistryApiClient._admission_required(payload)
+            routable = {name: None for name in names}
+            if not required:
+                routable.update(self.config.upstreams)
+                routable.update({item.name: None for item in profile.runtime_upstreams})
+            routed = self.route_tool(proxied_tool_name, routable)
+            # Canonical assignments win over a local alias collision, including
+            # before organization admission becomes mandatory.
+            if routed.upstream_name in names:
+                resolved = await self.registry_client.fetch_profile_upstream(profile_name, routed.upstream_name, get_current_principal())
+                return routed, ProfileUpstream(config=resolved.config, server_name=resolved.server_name, managed=resolved.managed)
+            if required:
+                return routed, None
+        else:
+            routable = {**self.config.upstreams, **{item.name: None for item in profile.runtime_upstreams}}
+            routed = self.route_tool(proxied_tool_name, routable)
+        for runtime_upstream in profile.runtime_upstreams:
+            if runtime_upstream.name == routed.upstream_name:
+                if self.registry_client is None:
+                    raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
+                resolved = await self.registry_client.resolve_upstream(runtime_upstream, get_current_principal())
+                return routed, ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
+        if routed.upstream_name in profile.upstreams:
+            return routed, ProfileUpstream(config=self.config.upstreams[routed.upstream_name])
         return routed, None
+
+    async def _ensure_runtime_registration(self) -> None:
+        if self.device_heartbeat_enabled() and self.device_heartbeat_last_success_at is None:
+            await self.send_device_heartbeat()
 
     async def _profile_upstreams(self, profile_name: str) -> dict[str, UpstreamConfig]:
         return {
@@ -557,26 +593,25 @@ class ToolRouter:
 
     async def _profile_upstream_details(self, profile_name: str) -> dict[str, ProfileUpstream]:
         profile = self._profile(profile_name)
-        upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
-
-        if profile.runtime_upstreams:
-            if self.registry_client is None:
-                raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
-            principal = get_current_principal()
-            for runtime_upstream in profile.runtime_upstreams:
-                resolved = await self.registry_client.resolve_upstream(runtime_upstream, principal)
-                upstreams[resolved.name] = ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
-
+        canonical: dict[str, ProfileUpstream] = {}
         if self.config.local_proxy.enabled and self.config.local_proxy.sync_from_lightnow:
             if self.registry_client is None:
                 raise ToolRoutingError("local proxy sync requires registry_api to be enabled")
-            principal = get_current_principal()
-            for resolved in await self.registry_client.fetch_profile_upstreams(profile_name, principal):
-                upstreams[resolved.name] = ProfileUpstream(
-                    config=resolved.config,
-                    server_name=resolved.server_name,
-                )
-
+            await self._ensure_runtime_registration()
+            resolved_profile = await self.registry_client.fetch_profile(profile_name, get_current_principal())
+            canonical = {item.name: ProfileUpstream(config=item.config, server_name=item.server_name, managed=item.managed)
+                         for item in resolved_profile.upstreams}
+            if resolved_profile.admission_required:
+                return canonical
+        upstreams = {name: ProfileUpstream(config=self.config.upstreams[name]) for name in profile.upstreams}
+        for runtime_upstream in profile.runtime_upstreams:
+            if runtime_upstream.name in canonical:
+                continue
+            if self.registry_client is None:
+                raise ToolRoutingError("profile uses runtime_upstreams but registry_api is not enabled")
+            resolved = await self.registry_client.resolve_upstream(runtime_upstream, get_current_principal())
+            upstreams[resolved.name] = ProfileUpstream(config=resolved.config, server_name=runtime_upstream.server)
+        upstreams.update(canonical)
         return upstreams
 
     async def _emit_call_event(
@@ -604,7 +639,7 @@ class ToolRouter:
                 **runtime_request_metadata(
                     arguments,
                     request_meta,
-                    capture_arguments=self.config.local_proxy.capture_tool_arguments,
+                    capture_arguments=self.config.local_proxy.capture_tool_arguments and not (upstream and upstream.managed),
                 ),
                 "upstream_transport": upstream.config.transport if upstream else None,
                 "response_items_count": len(result.content),
@@ -652,7 +687,7 @@ class ToolRouter:
         """Return whether this observed Local Proxy has enough data to report presence."""
         return bool(
             self.config.local_proxy.enabled
-            and self.config.local_proxy.telemetry_enabled
+            and (self.config.local_proxy.telemetry_enabled or self.config.local_proxy.sync_from_lightnow)
             and self.registry_client is not None
             and self.config.local_proxy.device_installation_id
             and self.config.local_proxy.client_instance_id
@@ -676,6 +711,7 @@ class ToolRouter:
                 "name": self.client_context.name or local_proxy.client_name,
                 "version": self.client_context.version or local_proxy.client_version,
                 "profile": local_proxy.profile,
+                **({"managed_capabilities": [MANAGED_CAPABILITY]} if local_proxy.sync_from_lightnow else {}),
                 "runner_name": local_proxy.runner_name,
                 "runner_version": __version__,
                 **runner_versions,
@@ -683,11 +719,14 @@ class ToolRouter:
             },
         }
         try:
-            await self.registry_client.post_device_heartbeat(
+            result = await self.registry_client.post_device_heartbeat(
                 str(local_proxy.device_installation_id),
                 str(local_proxy.client_instance_id),
                 payload,
             )
+            for client in result.get("device", {}).get("clients", []):
+                if client.get("client_instance_id") == str(local_proxy.client_instance_id):
+                    self.registry_client.runtime_client_id = str(UUID(client["id"]))
         except Exception as exc:
             self.device_heartbeat_last_error = error_message(exc)
             logger.warning("failed to post LightNow device heartbeat: %s", exc)

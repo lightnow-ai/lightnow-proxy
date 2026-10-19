@@ -46,6 +46,19 @@ their parameter-header schemas from that same fully discovered client.
 The managed dispatch primitive authorizes that inventory before sending once;
 schema-mismatch recovery and interactive retries must return to its policy gate.
 
+For managed connections the existing device heartbeat declares
+`managed-connections.v1` and obtains the actor-owned runtime client ID, even when
+optional activity capture is disabled. Registry supplies the canonical connection,
+assignment and bounded bootstrap context. Complete private inventory reporting
+returns exact allowed original names from the same backend authorizer as dispatch.
+The Proxy filters discovery and checks that decision again on the actual upstream
+session before one business call. Absolute expiry and a monotonic deadline both
+apply; reporting does not renew the lease. Managed contexts do not authorize
+resource methods. Synchronized profiles bypass persistent tool caches and stale
+fallbacks. Canonical aliases take precedence; required organization admission also
+excludes local static and legacy runtime overrides from the managed profile.
+
+
 ## Install
 
 Requirements:
