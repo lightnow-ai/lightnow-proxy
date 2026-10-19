@@ -330,14 +330,18 @@ class ToolRouter:
         started = monotonic()
         routed: RoutedTool | None = None
         upstream: ProfileUpstream | None = None
+        reserved = self.managed_events_enabled() and reserved_managed_namespace(proxied_tool_name.partition("__")[0])
         try:
+            if reserved:
+                # Commit an unattributed attempt before any control-plane IO.
+                self._event_outbox().unattributed()
             try:
                 routed, upstream = await self._call_target(profile_name, proxied_tool_name)
             except BaseException as resolution_error:
-                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, resolution_error)
+                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, resolution_error, reserved=reserved)
                 raise
             if upstream is None:
-                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, ToolRoutingError("MANAGED_RUNTIME_NOT_READY"))
+                await self._record_unresolved_managed_attempt(profile_name, proxied_tool_name, ToolRoutingError("MANAGED_RUNTIME_NOT_READY"), reserved=reserved)
                 result = CallToolResult(
                     content=[
                         TextContent(type="text", text=f"Tool {proxied_tool_name!r} is not available in this profile.")
@@ -358,7 +362,7 @@ class ToolRouter:
             if upstream.managed is None:
                 result = await self.upstream_client.call_tool(upstream.config, routed.original_name, arguments or {})
             else:
-                result = await self._call_managed_tool(upstream, routed.original_name, arguments or {})
+                result = await self._call_managed_tool(upstream, routed.original_name, arguments or {}, reserved=reserved)
             await self._emit_call_event(
                 profile_name,
                 proxied_tool_name,
@@ -396,7 +400,7 @@ class ToolRouter:
                 raise ToolRoutingError("EVIDENCE_STORE_UNAVAILABLE") from None
             if isinstance(leaf, RegistryApiError) and str(leaf) in {
                 "MANAGED_TOOL_DENIED", "MANAGED_AUTHORITY_EXPIRED", "MANAGED_CONTEXT_MISMATCH",
-                "MANAGED_RUNTIME_NOT_READY", "INVALID_MANAGED_CONTEXT", "INVALID_TOOL_AUTHORIZATION",
+                "MANAGED_RUNTIME_NOT_READY", "INVALID_MANAGED_CONTEXT", "INVALID_TOOL_AUTHORIZATION", "MANAGED_ASSIGNMENT_UNAVAILABLE",
             }:
                 # Expected managed decisions use the existing downstream MCP
                 # tool-error path, including through native SDK task groups.
@@ -420,7 +424,7 @@ class ToolRouter:
         identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
         self._event_outbox().remember(managed, identity)
 
-    async def _record_unresolved_managed_attempt(self, profile: str, wire_name: str, error: BaseException) -> None:
+    async def _record_unresolved_managed_attempt(self, profile: str, wire_name: str, error: BaseException, *, reserved: bool) -> None:
         namespace = wire_name.partition("__")[0]
         if not self.managed_events_enabled() or not reserved_managed_namespace(namespace) or self.registry_client is None:
             return
@@ -428,19 +432,17 @@ class ToolRouter:
         try:
             identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
         except RegistryApiError:
-            outbox.unattributed()
             return
-        call = outbox.begin_cached(identity, profile, str(UUID(hex=namespace[3:])))
+        call = outbox.begin_cached(identity, profile, str(UUID(hex=namespace[3:])), reserved=reserved)
         if call is None:
-            outbox.unattributed()
             return
         try:
             leaf = unwrap_error(error)
             phase = "runtime_failed"
             code = "CONTROL_PLANE_UNAVAILABLE" if isinstance(leaf, httpx.HTTPError) else (
                 "MANAGED_CONTEXT_MISMATCH" if str(leaf) == "MANAGED_CONTEXT_MISMATCH" else "MANAGED_RUNTIME_NOT_READY")
-            if isinstance(leaf, RegistryApiError) and str(leaf) == "MANAGED_AUTHORITY_EXPIRED":
-                phase, code = "denied", "MANAGED_AUTHORITY_EXPIRED"
+            if isinstance(leaf, RegistryApiError) and str(leaf) in {"MANAGED_AUTHORITY_EXPIRED", "MANAGED_ASSIGNMENT_UNAVAILABLE"}:
+                phase, code = "denied", "ASSIGNMENT_UNAVAILABLE" if str(leaf) == "MANAGED_ASSIGNMENT_UNAVAILABLE" else "MANAGED_AUTHORITY_EXPIRED"
             if isinstance(leaf, httpx.HTTPStatusError):
                 try:
                     body = leaf.response.json()
@@ -459,13 +461,13 @@ class ToolRouter:
         finally:
             call.release()
 
-    async def _call_managed_tool(self, upstream: ProfileUpstream, tool_name: str, arguments: dict[str, Any]) -> CallToolResult:
+    async def _call_managed_tool(self, upstream: ProfileUpstream, tool_name: str, arguments: dict[str, Any], *, reserved: bool = False) -> CallToolResult:
         managed = upstream.managed
         if self.registry_client is None or managed is None:
             raise ToolRoutingError("MANAGED_CONTROL_PLANE_REQUIRED")
         identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
         outbox = self._event_outbox()
-        call = outbox.begin(managed, identity)
+        call = outbox.begin(managed, identity, reserved=reserved)
         try:
             managed.assert_current()
 
@@ -730,8 +732,11 @@ class ToolRouter:
                                  if item.name not in managed_aliases and not reserved_managed_namespace(item.name)})
             # Reserved UUID namespaces never fall back to a different instance,
             # including local overrides after detachment or alias reuse.
-            if reserved_managed_namespace(proxied_tool_name):
+            namespace = proxied_tool_name.partition("__")[0]
+            if reserved_managed_namespace(namespace):
                 routable = {name: None for name in managed_names}
+                if namespace not in managed_names:
+                    raise RegistryApiError("MANAGED_ASSIGNMENT_UNAVAILABLE")
             routed = self.route_tool(proxied_tool_name, routable)
             if routed.upstream_name in names:
                 resolved = await self.registry_client.fetch_profile_upstream(profile_name, names[routed.upstream_name], get_current_principal())

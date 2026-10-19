@@ -350,3 +350,51 @@ async def test_report_only_receipt_retains_original_context_for_closed_control_p
     assert all(fact["reporting_proof"] == managed.reporting_proof for fact in facts)
     assert all("original_tool_name" not in fact for fact in facts)
     assert "private " not in json.dumps(facts)
+
+
+def test_preflight_reservations_transfer_atomically_and_capacity_does_not_create_orphan_locks(tmp_path, monkeypatch):
+    box = journal(tmp_path)
+    box.unattributed()
+    box.unattributed()
+    call = box.begin(lease(), IDENTITY, reserved=True)
+    box.record(call, "denied", "TOOL_NOT_SELECTED")
+    call.release()
+    assert box.status()["unattributed_attempts"] == 1
+    locks = set(box.path.parent.glob("*.lock"))
+    monkeypatch.setattr("lightnow_proxy.managed_events.MAX_PENDING_CALLS", 1)
+    box.unattributed()
+    with pytest.raises(EvidenceStoreError):
+        box.begin(lease(), IDENTITY, reserved=True)
+    assert box.status()["unattributed_attempts"] == 2
+    assert len(box.pending(IDENTITY)) == 2
+    assert set(box.path.parent.glob("*.lock")) == locks
+
+
+def test_process_exit_during_preflight_keeps_a_durable_gap_without_inventing_an_owner(tmp_path):
+    box = journal(tmp_path)
+    subprocess.run([sys.executable, "-c", """
+import os, sys
+from pathlib import Path
+from lightnow_proxy.managed_events import ManagedEventOutbox
+ManagedEventOutbox(Path(sys.argv[1])).unattributed()
+os._exit(0)
+""", str(box.path)], check=True, timeout=10)
+    assert ManagedEventOutbox(box.path).status()["unattributed_attempts"] == 1
+    assert box.status()["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_removed_assignment_is_denied_using_its_original_report_receipt(tmp_path):
+    router = managed_router(tmp_path)
+    managed = lease()
+    await router._remember_reporter(managed)
+    with respx.mock(assert_all_called=True) as api:
+        api.get(REGISTRY + "/integrations/profiles/default/servers").respond(200, json={"servers": [], "organization_admission": {"required": True, "policy_revision": 1}})
+        with pytest.raises(Exception, match="MANAGED_ASSIGNMENT_UNAVAILABLE"):
+            await router.call_tool("default", managed.tool_namespace + "__read", {"value": "private request"})
+    box = router._event_outbox()
+    facts = box.pending(await router.registry_client.managed_report_identity())
+    assert [fact["phase"] for fact in facts] == ["attempted", "denied"]
+    assert facts[-1]["reason_code"] == "ASSIGNMENT_UNAVAILABLE"
+    assert all(fact["reporting_proof"] == managed.reporting_proof for fact in facts)
+    assert box.status()["unattributed_attempts"] == 0

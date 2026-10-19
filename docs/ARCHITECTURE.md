@@ -241,3 +241,11 @@ of inventing an owner or reporting a successful call. Required evidence status
 exposes that gap. Receipt storage is separately bounded to 2,000 entries and
 expired receipts can be removed; pending event facts remain subject to their
 existing explicit-resolution policy.
+
+Before the first control-plane lookup, reserve a durable unattributed attempt.
+Transfer that reservation into the attributed call journal in the same SQLite
+transaction as its `attempted` fact. A process exit during lookup therefore
+leaves a visible unattributed gap. Completed attribution consumes exactly its
+own reservation; missing receipts and failed journal commits retain the gap.
+A currently missing assignment in a successfully fetched profile is an explicit
+assignment denial, distinct from an unavailable control plane.

@@ -106,12 +106,12 @@ class ManagedEventOutbox:
         except (OSError, sqlite3.Error) as exc:
             raise EvidenceStoreError() from exc
 
-    def begin_cached(self, identity: tuple[str, str, str], profile: str, assignment_id: str) -> ManagedCall | None:
+    def begin_cached(self, identity: tuple[str, str, str], profile: str, assignment_id: str, *, reserved: bool = False) -> ManagedCall | None:
         try:
             with closing(self._connect()) as db:
                 row = db.execute("SELECT proof,report_until FROM report_receipts WHERE identity=? AND profile=? AND assignment_id=? AND report_until>?",
                                  (json.dumps(identity), profile, assignment_id, int(time()))).fetchone()
-            return self._begin(row["proof"], row["report_until"], identity) if row is not None else None
+            return self._begin(row["proof"], row["report_until"], identity, reserved=reserved) if row is not None else None
         except (OSError, sqlite3.Error) as exc:
             raise EvidenceStoreError() from exc
 
@@ -122,30 +122,36 @@ class ManagedEventOutbox:
         except (OSError, sqlite3.Error) as exc:
             raise EvidenceStoreError() from exc
 
-    def begin(self, managed: ManagedRuntime, identity: tuple[str, str, str]) -> ManagedCall:
+    def begin(self, managed: ManagedRuntime, identity: tuple[str, str, str], *, reserved: bool = False) -> ManagedCall:
         if not managed.reporting_proof:
             raise EvidenceStoreError()
-        return self._begin(managed.reporting_proof, managed.issued_at + 7 * 86400, identity)
+        return self._begin(managed.reporting_proof, managed.issued_at + 7 * 86400, identity, reserved=reserved)
 
-    def _begin(self, proof: str, report_until: int, identity: tuple[str, str, str]) -> ManagedCall:
+    def _begin(self, proof: str, report_until: int, identity: tuple[str, str, str], *, reserved: bool) -> ManagedCall:
         call_id = str(uuid4())
-        lock = self._lock(call_id)
+        lock: FileLock | None = None
         try:
             with closing(self._connect()) as db, db:
                 # Take the native DB writer lock before reserving bounded capacity.
                 db.execute("BEGIN IMMEDIATE")
                 if db.execute("SELECT COUNT(*) FROM calls").fetchone()[0] >= MAX_PENDING_CALLS:
                     raise EvidenceStoreError()
+                lock = self._lock(call_id)
                 base = {"schema_version": 2, "call_id": call_id, "reporting_proof": proof}
                 db.execute("INSERT INTO calls(id,identity,base,phase,report_until) VALUES(?,?,?,?,?)",
                            (call_id, json.dumps(identity), json.dumps(base), "attempted", report_until))
                 self._append(db, call_id, base, "attempted")
+                if reserved and db.execute("UPDATE evidence_gaps SET unattributed_attempts=unattributed_attempts-1 "
+                                           "WHERE id=1 AND unattributed_attempts>0").rowcount != 1:
+                    raise EvidenceStoreError()
             return ManagedCall(call_id, lock)
         except (OSError, sqlite3.Error) as exc:
-            lock.release()
+            if lock is not None:
+                lock.release()
             raise EvidenceStoreError() from exc
         except BaseException:
-            lock.release()
+            if lock is not None:
+                lock.release()
             raise
 
     @staticmethod
