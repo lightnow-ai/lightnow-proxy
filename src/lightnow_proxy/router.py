@@ -1032,7 +1032,12 @@ class ToolRouter:
                     "duration_ms": min(30000, self._duration_ms(started)),
                 })
                 return
-            await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"])
+            contribution = request.get("contribution")
+            preview_options = {}
+            if isinstance(contribution, dict) and contribution.get("state") == "preparing":
+                preview_options = {"prepare_contribution": True, "contribution_template": contribution.get("template"),
+                                   "contribution_inputs": resolved.contribution_inputs}
+            await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"], **preview_options)
             self._queue_managed_application(managed, request["id"])
         except Exception:
             # No untrusted tool metadata, URLs, credentials or raw errors in logs.

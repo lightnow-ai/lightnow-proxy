@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Valida
 
 from lightnow_proxy.auth import Principal
 from lightnow_proxy.config import RegistryApiConfig, RuntimeUpstreamConfig, UpstreamConfig
+from lightnow_proxy.discovery_contributions import sanitized_setup_preview
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.upstream import ToolInventory
 
@@ -263,6 +264,7 @@ class ResolvedRuntimeUpstream:
     config: UpstreamConfig
     server_name: str | None = None
     managed: ManagedRuntime | None = None
+    contribution_inputs: dict[str, Any] | None = None
 
 
 async def refresh_cli_session(
@@ -468,9 +470,12 @@ class RegistryApiClient:
         self, managed: ManagedRuntime, inventory: ToolInventory, attempt_id: str, etag: str,
         original_tool_name: str | None = None, *, observed: Callable[[str], None] | None = None,
         reported: Callable[[str], None] | None = None,
+        prepare_contribution: bool = False, contribution_template: Any = None, contribution_inputs: Any = None,
     ) -> set[str]:
         report = {"status": "complete", "page_count": inventory.page_count, "duration_ms": inventory.duration_ms,
                   "tools": [tool.model_dump(by_alias=True, mode="json", exclude_none=True) for tool in inventory.tools]}
+        if prepare_contribution:
+            report["setup_preview"] = sanitized_setup_preview(contribution_template, contribution_inputs)
         if original_tool_name is not None:
             report["original_tool_name"] = original_tool_name
             if managed.reporting_proof is not None:
@@ -617,6 +622,7 @@ class RegistryApiClient:
                     runtime_files_namespace=self._runtime_files_namespace(profile_name, str(managed.connection_id), str(managed.assignment_id)),
                 ),
                 managed=managed,
+                contribution_inputs=item.get("context", {}).get("contribution_inputs") if isinstance(item.get("context"), dict) else None,
             )
         if not isinstance(server_name, str) or server_name == "":
             raise RegistryApiError(f"Registry profile server {alias!r} is missing server_name")
