@@ -136,6 +136,8 @@ class ToolRouter:
         self._managed_outbox: ManagedEventOutbox | None = None
         self._managed_report_error: str | None = None
         self._managed_upload_lock = asyncio.Lock()
+        self._managed_applications: dict[str, tuple[ManagedRuntime, str]] = {}
+        self._managed_application_error: str | None = None
 
     def update_client_context(
         self,
@@ -231,8 +233,11 @@ class ToolRouter:
             upstream.managed.assert_current()
             async with self.upstream_client.session(upstream.config) as client:
                 inventory = await self.upstream_client.discover_tools(client)
-                allowed = await self.registry_client.authorize_inventory(upstream.managed, inventory)
+                observations: list[str] = []
+                allowed = await self.registry_client.authorize_inventory(upstream.managed, inventory, observed=observations.append)
             upstream.managed.assert_current()
+            if observations:
+                self._queue_managed_application(upstream.managed, observations[-1])
             return upstream_name, [tool for tool in inventory.tools if tool.name in allowed], None
         except Exception as exc:
             return upstream_name, [], exc
@@ -477,8 +482,15 @@ class ToolRouter:
                     if any(tool.name == tool_name for tool in inventory.tools):
                         call.original_tool_name = tool_name
 
-                await self.registry_client.authorize_inventory(managed, inventory, tool_name, observed=observed)
+                try:
+                    await self.registry_client.authorize_inventory(managed, inventory, tool_name, observed=observed)
+                except ManagedToolDenied:
+                    if call.observation_id:
+                        self._queue_managed_application(managed, call.observation_id)
+                    raise
                 managed.assert_current()
+                if call.observation_id:
+                    self._queue_managed_application(managed, call.observation_id)
                 outbox.record(call, "dispatch_started")
                 try:
                     managed.assert_current()
@@ -882,6 +894,7 @@ class ToolRouter:
         local_proxy = self.config.local_proxy
         self.device_heartbeat_last_attempt_at = datetime.now(UTC)
         device_versions, runner_versions = heartbeat_version_fields(local_proxy)
+        applications = self._pending_managed_applications() if local_proxy.sync_from_lightnow else {}
         payload = {
             "device": {
                 "reported_hostname": local_proxy.device_hostname,
@@ -893,6 +906,8 @@ class ToolRouter:
                 "version": self.client_context.version or local_proxy.client_version,
                 "profile": local_proxy.profile,
                 **({"managed_capabilities": [MANAGED_CAPABILITY]} if local_proxy.sync_from_lightnow else {}),
+                **({"managed_applications": [{"observation_id": observation, "context_proof": managed.context_proof}
+                                              for managed, observation in applications.values()]} if applications else {}),
                 "runner_name": local_proxy.runner_name,
                 "runner_version": __version__,
                 **runner_versions,
@@ -909,6 +924,8 @@ class ToolRouter:
                 if client.get("client_instance_id") == str(local_proxy.client_instance_id):
                     self.registry_client.runtime_client_id = str(UUID(client["id"]))
             if local_proxy.sync_from_lightnow and self.registry_client.runtime_client_id is not None:
+                if applications:
+                    self._acknowledge_managed_applications(applications, result.get("managed_application_acks"))
                 self._schedule_discoveries(result.get("managed_discovery_requests"))
         except Exception as exc:
             self.device_heartbeat_last_error = error_message(exc)
@@ -1009,9 +1026,47 @@ class ToolRouter:
                 })
                 return
             await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"])
+            self._queue_managed_application(managed, request["id"])
         except Exception:
             # No untrusted tool metadata, URLs, credentials or raw errors in logs.
             logger.warning("private discovery could not be reported under current authority")
+
+    def _queue_managed_application(self, managed: ManagedRuntime, observation: str) -> None:
+        managed.assert_current()
+        observation = str(UUID(observation))
+        key = str(managed.assignment_id)
+        self._pending_managed_applications()
+        if key not in self._managed_applications and len(self._managed_applications) >= 2000:
+            raise RegistryApiError("MANAGED_APPLICATION_CAPACITY_EXCEEDED")
+        self._managed_applications[key] = (managed, observation)
+
+    def _pending_managed_applications(self) -> dict[str, tuple[ManagedRuntime, str]]:
+        for key, (managed, _) in list(self._managed_applications.items()):
+            try:
+                managed.assert_current()
+            except RegistryApiError:
+                del self._managed_applications[key]
+                self._managed_application_error = "MANAGED_APPLICATION_EXPIRED"
+        return dict(list(self._managed_applications.items())[:20])
+
+    def _acknowledge_managed_applications(self, sent: dict[str, tuple[ManagedRuntime, str]], response: Any) -> None:
+        codes = {"OBSERVATION_UNAVAILABLE", "OBSERVATION_INCOMPLETE", "OBSERVATION_UNBOUND", "CONTEXT_CHANGED",
+                 "ACCESS_DENIED", "CAPACITY_EXCEEDED", "RUNTIME_INCOMPATIBLE"}
+        expected = {observation for _, observation in sent.values()}
+        if (not isinstance(response, list) or len(response) != len(expected)
+                or any(not isinstance(item, dict) or not isinstance(item.get("observation_id"), str)
+                       or item.get("observation_id") not in expected
+                       or item.get("status") not in ("accepted", "rejected")
+                       or (item.get("status") == "accepted" and item.get("code") is not None)
+                       or (item.get("status") == "rejected" and (not isinstance(item.get("code"), str)
+                                                                 or item.get("code") not in codes)) for item in response)
+                or {item["observation_id"] for item in response} != expected):
+            self._managed_application_error = "INVALID_MANAGED_APPLICATION_ACK"
+            return
+        self._managed_application_error = next((item["code"] for item in response if item["status"] == "rejected"), None)
+        for key, application in sent.items():
+            if self._managed_applications.get(key) == application:
+                del self._managed_applications[key]
 
     def device_heartbeat_status(self) -> dict[str, Any]:
         """Return non-secret local diagnostics for the last heartbeat attempt."""
@@ -1025,6 +1080,8 @@ class ToolRouter:
             if self.device_heartbeat_last_success_at
             else None,
             "last_error": self.device_heartbeat_last_error,
+            "managed_applications_pending": len(self._managed_applications),
+            "managed_application_error": self._managed_application_error,
         }
 
     async def emit_lifecycle_event(self, event_type: str, status: str = "success") -> None:

@@ -195,6 +195,18 @@ requiring `/team-b/admin` or plain `admin`.
 
 ## Required managed call evidence
 
+After complete discovery and validation of the current tool authorization, the
+runtime queues the exact observation and its original short-lived context proof
+on the existing device heartbeat. This includes an applied empty/denied policy.
+At most 20 acknowledgements are sent per heartbeat; the private in-memory queue
+is bounded to 2,000 assignments. Expired authority is discarded with an explicit
+local status, never renewed. Missing or malformed server acknowledgement retains
+the original pending item; a response cannot remove a newer concurrent item.
+Status exposes only pending count and a closed error code. Acknowledgement
+confirms this runtime's validated policy, not refreshed menus in every AI client,
+business-call success, or a new execution grant. Deploy the supporting Registry
+API before releasing this client capability.
+
 Managed calls use Registry's existing `POST /integrations/runtime-events` v2
 contract (`registry-api/specs/managed-runtime-event.schema.json`). This is
 independent of optional activity capture and never includes arguments, results,

@@ -532,3 +532,64 @@ async def test_managed_names_stay_bound_to_assignment_through_alias_collision_re
                     await router.call_tool("default", first_wire, {"value": "stale"})
                 assert first_calls() == ["_read", "_read"]
                 assert second_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_application_heartbeat_retries_exact_lease_and_preserves_newer_application(tmp_path):
+    router = managed_router(tmp_path)
+    local = router.config.local_proxy
+    local.device_installation_id, local.client_instance_id = uuid4(), uuid4()
+    local.device_hostname = "applied-fixture"
+    context = managed_context()
+    lease = ManagedRuntime.model_validate({**context, "deadline": monotonic() + 45})
+    router._queue_managed_application(lease, DISCOVERY)
+    newer = str(uuid4())
+    attempts = []
+
+    def heartbeat(request):
+        body = json.loads(request.content)
+        attempts.append(body["client"]["managed_applications"])
+        result = {"device": {"clients": [{"id": CLIENT, "client_instance_id": str(local.client_instance_id)}]}}
+        if len(attempts) == 1:
+            # An older API cannot confirm application. Keep exactly the same proof.
+            return httpx.Response(200, json=result)
+        router._queue_managed_application(lease, newer)
+        result["managed_application_acks"] = [{"observation_id": DISCOVERY, "status": "accepted", "code": None}]
+        return httpx.Response(200, json=result)
+
+    with respx.mock(assert_all_called=True) as api:
+        api.post(REGISTRY + f"/integrations/devices/{local.device_installation_id}/clients/{local.client_instance_id}/heartbeat").mock(side_effect=heartbeat)
+        assert await router.send_device_heartbeat()
+        assert router.device_heartbeat_status()["managed_application_error"] == "INVALID_MANAGED_APPLICATION_ACK"
+        assert await router.send_device_heartbeat()
+    assert attempts == [[{"observation_id": DISCOVERY, "context_proof": context["context_proof"]}]] * 2
+    assert router._managed_applications[ASSIGNMENT][1] == newer
+    router._acknowledge_managed_applications(router._pending_managed_applications(), [
+        {"observation_id": newer, "status": "rejected", "code": "ACCESS_DENIED"}])
+    status = router.device_heartbeat_status()
+    assert status["managed_applications_pending"] == 0 and status["managed_application_error"] == "ACCESS_DENIED"
+    assert "proof" not in json.dumps(status)
+
+
+@pytest.mark.parametrize("response", [None, {}, [], [{"observation_id": []}],
+    [{"observation_id": DISCOVERY, "status": "rejected", "code": []}],
+    [{"observation_id": DISCOVERY, "status": "accepted", "code": "ACCESS_DENIED"}],
+    [{"observation_id": DISCOVERY, "status": "accepted", "code": None}] * 2])
+def test_invalid_application_ack_never_discards_pending_evidence(tmp_path, response):
+    router = managed_router(tmp_path)
+    lease = ManagedRuntime.model_validate({**managed_context(), "deadline": monotonic() + 45})
+    router._queue_managed_application(lease, DISCOVERY)
+    router._acknowledge_managed_applications(router._pending_managed_applications(), response)
+    assert router.device_heartbeat_status()["managed_applications_pending"] == 1
+    assert router.device_heartbeat_status()["managed_application_error"] == "INVALID_MANAGED_APPLICATION_ACK"
+
+
+def test_application_queue_never_renews_expired_authority(tmp_path, monkeypatch):
+    router = managed_router(tmp_path)
+    lease = ManagedRuntime.model_validate({**managed_context(), "deadline": monotonic() + 45})
+    router._queue_managed_application(lease, DISCOVERY)
+    monkeypatch.setattr("lightnow_proxy.registry.time", lambda: lease.expires_at)
+    assert router._pending_managed_applications() == {}
+    assert router.device_heartbeat_status()["managed_application_error"] == "MANAGED_APPLICATION_EXPIRED"
+    with pytest.raises(RegistryApiError, match="MANAGED_AUTHORITY_EXPIRED"):
+        router._queue_managed_application(lease, str(uuid4()))
