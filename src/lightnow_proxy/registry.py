@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 import json
 import logging
 import os
@@ -310,6 +311,9 @@ class RegistryApiClient:
         self.runtime_files_connection_id = runtime_files_connection_id
         self.report_receipt_observer = report_receipt_observer
         self._access_token: str | None = None
+        self._access_token_deadline = 0.0
+        self._client_credentials_key: str | None = None
+        self._client_credentials_lock = asyncio.Lock()
         self._tenant_id: str | None = None
         self.runtime_client_id: str | None = None
 
@@ -904,8 +908,6 @@ class RegistryApiClient:
             raise RegistryApiError("LightNow session metadata does not match its access token subject")
 
     async def _client_credentials_token(self) -> str | None:
-        if self._access_token is not None:
-            return self._access_token
         if self.config.token_url is None or not self.config.client_id or not self.config.client_secret:
             return None
 
@@ -917,15 +919,32 @@ class RegistryApiClient:
         if self.config.audience:
             data["audience"] = self.config.audience
 
-        async with self._http_client() as client:
-            response = await client.post(str(self.config.token_url), data=data)
-            response.raise_for_status()
-            payload = response.json()
-        token = payload.get("access_token")
-        if not isinstance(token, str) or token == "":
-            raise RegistryApiError("Registry token endpoint did not return an access_token")
-        self._access_token = token
-        return token
+        credentials_key = hashlib.sha256(json.dumps([str(self.config.token_url), data], sort_keys=True).encode()).hexdigest()
+        async with self._client_credentials_lock:
+            if (self._access_token is not None and self._client_credentials_key == credentials_key
+                    and monotonic() < self._access_token_deadline):
+                return self._access_token
+            self._access_token = None
+            self._access_token_deadline = 0.0
+            started = monotonic()
+            async with self._http_client() as client:
+                response = await client.post(str(self.config.token_url), data=data)
+                response.raise_for_status()
+                payload = response.json()
+            token = payload.get("access_token")
+            if not isinstance(token, str) or token == "":
+                raise RegistryApiError("Registry token endpoint did not return an access_token")
+            lifetime = payload.get("expires_in")
+            if lifetime is not None:
+                if type(lifetime) is not int or lifetime <= 0:
+                    raise RegistryApiError("Registry token endpoint returned an invalid expires_in")
+                if monotonic() >= started + lifetime:
+                    raise RegistryApiError("Registry token endpoint returned an expired access_token")
+                # An unknown lifetime is never cached; known tokens renew early.
+                self._access_token_deadline = started + lifetime - min(30, lifetime / 10)
+            self._access_token = token
+            self._client_credentials_key = credentials_key
+            return token
 
     def _scope_id(self, upstream: RuntimeUpstreamConfig, principal: Principal | None) -> str | None:
         if upstream.scope_id:

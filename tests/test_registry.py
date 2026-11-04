@@ -27,6 +27,80 @@ from lightnow_proxy.registry import (
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 
 
+@pytest.mark.asyncio
+async def test_client_credentials_are_reacquired_before_expiry_and_after_rotation(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("lightnow_proxy.registry.monotonic", lambda: clock[0])
+    config = RegistryApiConfig(base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+                               client_id="own-client", client_secret="own-bootstrap")
+    client = RegistryApiClient(config)
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.example.test/token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "first-token", "expires_in": 60}),
+            httpx.Response(200, json={"access_token": "renewed-token", "expires_in": 60}),
+            httpx.Response(200, json={"access_token": "rotated-token", "expires_in": 60}),
+        ])
+        assert await client._client_credentials_token() == "first-token"
+        clock[0] = 150
+        assert await client._client_credentials_token() == "first-token"
+        clock[0] = 155
+        assert await client._client_credentials_token() == "renewed-token"
+        config.client_secret = "own-rotated-bootstrap"
+        assert await client._client_credentials_token() == "rotated-token"
+        assert len(route.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_share_one_current_client_token() -> None:
+    client = RegistryApiClient(RegistryApiConfig(
+        base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+        client_id="own-client", client_secret="own-bootstrap",
+    ))
+    async def issue_token(_request):
+        await asyncio.sleep(0)
+        return httpx.Response(200, json={"access_token": "current-token", "expires_in": 300})
+
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.example.test/token").mock(side_effect=issue_token)
+        assert await asyncio.gather(*(client._client_credentials_token() for _ in range(8))) == ["current-token"] * 8
+        assert len(route.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_token_without_expiry_is_not_cached_indefinitely() -> None:
+    client = RegistryApiClient(RegistryApiConfig(
+        base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+        client_id="own-client", client_secret="own-bootstrap",
+    ))
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.example.test/token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "first-token"}),
+            httpx.Response(200, json={"access_token": "second-token"}),
+        ])
+        assert await client._client_credentials_token() == "first-token"
+        assert await client._client_credentials_token() == "second-token"
+        assert len(route.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_renewal_does_not_reuse_an_expired_client_token(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("lightnow_proxy.registry.monotonic", lambda: clock[0])
+    client = RegistryApiClient(RegistryApiConfig(
+        base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+        client_id="own-client", client_secret="own-bootstrap",
+    ))
+    with respx.mock(assert_all_called=True) as router:
+        router.post("https://auth.example.test/token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "expired-token", "expires_in": 60}),
+            httpx.Response(401, json={"error": "invalid_client"}),
+        ])
+        assert await client._client_credentials_token() == "expired-token"
+        clock[0] = 200
+        with pytest.raises(httpx.HTTPStatusError):
+            await client._client_credentials_token()
+
+
 def test_runtime_http_context_becomes_streamable_http_upstream() -> None:
     upstream = RuntimeUpstreamConfig(name="grafana", server="grafana", version="1.0.0")
     config = upstream_config_from_runtime_context(
