@@ -58,31 +58,12 @@ class RuntimeSecretResolver:
         if provider_type != "vault_kv_v2":
             raise RuntimeSecretError(f"Unsupported runtime secret provider type: {provider_type}")
 
-        local = self.config.providers.get(provider_id, RuntimeSecretProviderConfig())
         provider_config = provider.get("config") if isinstance(provider.get("config"), dict) else {}
-        namespace = provider_config.get("namespace")
-        headers: dict[str, str] = {}
-        if isinstance(namespace, str) and namespace:
-            headers["X-Vault-Namespace"] = namespace
-
-        if local.auth_mode == "vault-proxy":
-            address = local.vault_proxy_url
-        else:
-            address = local.address_override or provider_config.get("address")
-            if not isinstance(address, str) or not address:
-                raise RuntimeSecretError(f"Vault address is missing for runtime provider {provider_id}")
-            token = await self._keyring_token(local, provider_id)
-            headers["X-Vault-Token"] = token
-
+        client, address, headers = await self.vault_connection(provider_id, provider_config)
         url = f"{str(address).rstrip('/')}/v1/{str(path).lstrip('/')}"
-        verify: str | bool = local.resolved_ca_file() or True
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(local.timeout_seconds),
-                verify=verify,
-                follow_redirects=False,
-            ) as client:
-                response = await client.get(url, headers=headers, params={"version": version} if version else None)
+            async with client:
+                response = await self.vault_request(client, "GET", url, headers=headers, params={"version": version} if version else None)
         except httpx.HTTPError as exc:
             raise RuntimeSecretError(f"Runtime Vault provider {provider_id} is not reachable") from exc
 
@@ -111,6 +92,49 @@ class RuntimeSecretResolver:
         if not isinstance(value, str | int | float | bool):
             raise RuntimeSecretError(f"Runtime Vault provider {provider_id} did not return the configured scalar field")
         return str(value)
+
+    async def vault_connection(
+        self, provider_id: str, provider_config: dict[str, Any], *, require_local: bool = False,
+    ) -> tuple[httpx.AsyncClient, str, dict[str, str]]:
+        """Reuse the existing TLS/bootstrap path; writes require explicit local enrollment."""
+        local = self.config.providers.get(provider_id)
+        if require_local and (local is None or local.auth_mode == "keyring" and not local.address_override):
+            raise RuntimeSecretError("Vault writes require an explicitly mapped local provider and address")
+        local = local or RuntimeSecretProviderConfig()
+        namespace = provider_config.get("namespace")
+        headers: dict[str, str] = {}
+        if isinstance(namespace, str) and namespace:
+            headers["X-Vault-Namespace"] = namespace
+
+        if local.auth_mode == "vault-proxy":
+            address = local.vault_proxy_url
+        else:
+            address = local.address_override or provider_config.get("address")
+            if not isinstance(address, str) or not address:
+                raise RuntimeSecretError(f"Vault address is missing for runtime provider {provider_id}")
+            token = await self._keyring_token(local, provider_id)
+            headers["X-Vault-Token"] = token
+
+        verify: str | bool = local.resolved_ca_file() or True
+        return httpx.AsyncClient(timeout=httpx.Timeout(local.timeout_seconds), verify=verify, follow_redirects=False), str(address), headers
+
+    @staticmethod
+    async def vault_request(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Bound decompressed IO before buffering Vault's untrusted response."""
+        async with client.stream(method, url, **kwargs) as response:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes(chunk_size=8192):
+                size += len(chunk)
+                if size > RuntimeSecretResolver.MAX_RESPONSE_BYTES:
+                    raise RuntimeSecretError("Runtime Vault provider returned an oversized response")
+                chunks.append(chunk)
+            headers = response.headers.copy()
+            # aiter_bytes has already decoded Content-Encoding; preserve status
+            # and metadata without asking the new response to decode it again.
+            headers.pop("content-encoding", None)
+            headers.pop("content-length", None)
+            return httpx.Response(response.status_code, headers=headers, content=b"".join(chunks), request=response.request)
 
     async def _keyring_token(self, config: RuntimeSecretProviderConfig, provider_id: str) -> str:
         try:
