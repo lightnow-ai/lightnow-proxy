@@ -66,6 +66,63 @@ async def test_resolves_runtime_binding_into_http_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reads_the_exact_pinned_vault_version_and_operation() -> None:
+    context = runtime_context()
+    context["external_secret_bindings"][0]["locator"].update(version=2, operation_id="own-operation")
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/github", params={"version": 2}).respond(
+            200,
+            json={"data": {"data": {"token": "confirmed-version-2", "_lightnow_operation_id": "own-operation"},
+                           "metadata": {"version": 2}}},
+        )
+        resolved = await RuntimeSecretResolver(RuntimeSecretsConfig()).resolve_context(context)
+    assert route.calls.last.request.url.params["version"] == "2"
+    assert resolved["probe_request"]["stdio"]["env"]["API_TOKEN"] == "confirmed-version-2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [None, True, False, 0, -1, "2", 2.0])
+async def test_rejects_invalid_pinned_versions_before_contacting_vault(version) -> None:
+    context = runtime_context()
+    context["external_secret_bindings"][0]["locator"]["version"] = version
+    with respx.mock(assert_all_called=False) as router:
+        with pytest.raises(RuntimeSecretError, match="version"):
+            await RuntimeSecretResolver(RuntimeSecretsConfig()).resolve_context(context)
+    assert not router.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locator", [
+    {"operation_id": "own-operation"},
+    {"version": 2, "operation_id": ""},
+    {"version": 2, "operation_id": None},
+])
+async def test_rejects_incomplete_operation_locators_before_contacting_vault(locator) -> None:
+    context = runtime_context()
+    context["external_secret_bindings"][0]["locator"].update(locator)
+    with respx.mock(assert_all_called=False) as router:
+        with pytest.raises(RuntimeSecretError, match="operation"):
+            await RuntimeSecretResolver(RuntimeSecretsConfig()).resolve_context(context)
+    assert not router.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata,operation", [({}, "own-operation"), ({"version": 3}, "own-operation"),
+                                              ({"version": True}, "own-operation"), ({"version": 2}, "other-operation")])
+async def test_never_injects_an_unconfirmed_vault_version_or_operation(metadata, operation) -> None:
+    context = runtime_context()
+    context["external_secret_bindings"][0]["locator"].update(version=2, operation_id="own-operation")
+    with respx.mock(assert_all_called=True) as router:
+        router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/github", params={"version": 2}).respond(
+            200, json={"data": {"data": {"token": "unconfirmed", "_lightnow_operation_id": operation},
+                               "metadata": metadata}},
+        )
+        with pytest.raises(RuntimeSecretError, match="version|operation"):
+            await RuntimeSecretResolver(RuntimeSecretsConfig()).resolve_context(context)
+    assert "API_TOKEN" not in context["probe_request"]["stdio"].get("env", {})
+
+
+@pytest.mark.asyncio
 async def test_uses_configured_vault_proxy_and_never_falls_back_to_provider_address() -> None:
     resolver = RuntimeSecretResolver(
         RuntimeSecretsConfig(

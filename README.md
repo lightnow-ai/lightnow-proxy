@@ -232,6 +232,11 @@ non-secret mappings on subsequent syncs. The optional OS-keyring path is
 available with `lightnow-proxy[keyring]`. Resolution failures are fail-closed
 and plaintext values are never added to the tool-schema cache.
 
+Version-pinned KV2 references are read using their exact Vault version. The
+reader checks the returned version and, for LightNow write operations, the
+operation identifier before injecting a value. A missing or mismatched version
+fails the request; it never falls back to the latest Vault value.
+
 ### Managed runtime files
 
 STDIO servers may attach bounded, non-secret `runtime_files` to their Runtime

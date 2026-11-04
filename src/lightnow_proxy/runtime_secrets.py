@@ -45,8 +45,14 @@ class RuntimeSecretResolver:
         resolution_mode = provider.get("resolution_mode")
         path = locator.get("path")
         field = locator.get("field")
+        version = locator.get("version")
+        operation_id = locator.get("operation_id")
         if not all(isinstance(item, str) and item for item in (provider_id, path, field)):
             raise RuntimeSecretError("External secret binding is incomplete")
+        if "version" in locator and (type(version) is not int or version < 1):
+            raise RuntimeSecretError("External secret binding has an invalid pinned version")
+        if "operation_id" in locator and (not isinstance(operation_id, str) or not operation_id or version is None):
+            raise RuntimeSecretError("External secret binding has an invalid pinned operation")
         if resolution_mode != "runtime":
             raise RuntimeSecretError("External secret binding is not marked for runtime resolution")
         if provider_type != "vault_kv_v2":
@@ -76,7 +82,7 @@ class RuntimeSecretResolver:
                 verify=verify,
                 follow_redirects=False,
             ) as client:
-                response = await client.get(url, headers=headers)
+                response = await client.get(url, headers=headers, params={"version": version} if version else None)
         except httpx.HTTPError as exc:
             raise RuntimeSecretError(f"Runtime Vault provider {provider_id} is not reachable") from exc
 
@@ -94,6 +100,13 @@ class RuntimeSecretResolver:
         payload_data = payload.get("data") if isinstance(payload, dict) else None
         data = payload_data if isinstance(payload_data, dict) else {}
         secret_data = data.get("data") if isinstance(data.get("data"), dict) else data
+        if version is not None:
+            metadata = data.get("metadata")
+            returned_version = metadata.get("version") if isinstance(metadata, dict) else None
+            if type(returned_version) is not int or returned_version != version:
+                raise RuntimeSecretError(f"Runtime Vault provider {provider_id} did not confirm the pinned version")
+        if operation_id is not None and secret_data.get("_lightnow_operation_id") != operation_id:
+            raise RuntimeSecretError(f"Runtime Vault provider {provider_id} did not confirm the pinned operation")
         value = secret_data.get(field) if isinstance(secret_data, dict) else None
         if not isinstance(value, str | int | float | bool):
             raise RuntimeSecretError(f"Runtime Vault provider {provider_id} did not return the configured scalar field")
