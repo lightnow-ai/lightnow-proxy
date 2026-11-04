@@ -175,6 +175,9 @@ class RegistryApiConfig(BaseModel):
     token_url: HttpUrl | None = None
     client_id: str | None = None
     client_secret: str | None = None
+    client_private_key_file: str | None = None
+    client_key_id: str | None = None
+    client_scope: str | None = None
     audience: str | None = None
     include_secrets: bool = True
     default_scope_type: Literal["system", "tenant", "user"] = "system"
@@ -190,10 +193,15 @@ class RegistryApiConfig(BaseModel):
     runtime_files_dir: str = "~/.lightnow/runtime-files"
 
     @model_validator(mode="after")
-    def named_cli_session_must_have_identity_guardrails(self) -> "RegistryApiConfig":
+    def authentication_settings_are_consistent(self) -> "RegistryApiConfig":
         if self.use_cli_session and self.cli_session_path:
             if not self.expected_issuer or not self.expected_subject:
                 raise ValueError("cli_session_path requires expected_issuer and expected_subject")
+        if self.client_private_key_file or self.client_key_id:
+            if not self.client_private_key_file or not self.client_key_id or not self.client_id or not self.token_url:
+                raise ValueError("private_key_jwt requires a key file, key ID, client ID and token endpoint")
+            if self.client_secret or self.use_cli_session:
+                raise ValueError("private_key_jwt cannot be combined with a client secret or personal CLI session")
         return self
 
     def resolved_client_secret(self) -> str | None:

@@ -237,6 +237,16 @@ reader checks the returned version and, for LightNow write operations, the
 operation identifier before injecting a value. A missing or mismatched version
 fails the request; it never falls back to the latest Vault value.
 
+An enrolled organization connector authenticates with its own OAuth client and
+local RSA private key using standard `private_key_jwt`. Its Registry connection
+uses `client_private_key_file`, `client_key_id` and `client_scope` alongside the
+enrollment's `client_id` and `token_url`. Protect the key file with the operating
+system's credential-file permissions; only its public JWK belongs in enrollment.
+This mode cannot share a personal CLI session or fall back to a client secret.
+Machine tokens renew before expiry, and replacing the local key invalidates the
+cached token. These authentication settings alone do not enroll or authorize a
+connector; the server must separately admit its current enrollment and provider.
+
 ### Managed runtime files
 
 STDIO servers may attach bounded, non-secret `runtime_files` to their Runtime

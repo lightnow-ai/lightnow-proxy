@@ -7,9 +7,12 @@ import logging
 from pathlib import Path
 import threading
 import time
+from urllib.parse import parse_qs
 
 from filelock import FileLock, Timeout as FileLockTimeout
 import httpx
+import httpx2
+import jwt
 import pytest
 import respx
 
@@ -25,6 +28,76 @@ from lightnow_proxy.registry import (
     upstream_config_from_runtime_context,
 )
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
+
+
+@pytest.mark.asyncio
+async def test_machine_key_authentication_uses_native_rfc7523_and_rotates_without_secret_fallback(tmp_path, monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    import lightnow_proxy.registry as registry_module
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_file = tmp_path / "own-client-key.pem"
+
+    def write_key():
+        key_file.write_bytes(private_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+        ))
+        key_file.chmod(0o600)
+
+    write_key()
+    config = RegistryApiConfig(base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+                               client_id="own-connector", client_private_key_file=str(key_file),
+                               client_key_id="first-key", client_scope="secret-store.operations.v1")
+    requests = []
+
+    def token_endpoint(request):
+        form = parse_qs(request.content.decode())
+        assert form["grant_type"] == ["client_credentials"]
+        assert form["scope"] == ["secret-store.operations.v1"]
+        assert "client_secret" not in form
+        assert b"PRIVATE KEY" not in request.content
+        assertion = form["client_assertion"][0]
+        assert form["client_assertion_type"] == ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"]
+        claims = jwt.decode(assertion, private_key.public_key(), algorithms=["RS256"],
+                            audience=str(config.token_url), issuer=config.client_id,
+                            options={"require": ["exp", "iat", "jti", "sub", "iss", "aud"]})
+        assert claims["sub"] == config.client_id
+        assert jwt.get_unverified_header(assertion)["kid"] == config.client_key_id
+        requests.append(True)
+        return httpx2.Response(200, json={"access_token": "issued-token-" + str(len(requests)), "expires_in": 300})
+
+    native_client = registry_module.AsyncOAuth2Client
+
+    def isolated_client(*args, **kwargs):
+        assert kwargs["follow_redirects"] is False
+        return native_client(*args, **kwargs, transport=httpx2.MockTransport(token_endpoint))
+
+    monkeypatch.setattr(registry_module, "AsyncOAuth2Client", isolated_client)
+    client = RegistryApiClient(config)
+    assert await client._client_credentials_token() == "issued-token-1"
+    assert await client._client_credentials_token() == "issued-token-1"
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    write_key()
+    config.client_key_id = "rotated-key"
+    assert await client._client_credentials_token() == "issued-token-2"
+    assert len(requests) == 2
+    key_file.unlink()
+    with pytest.raises(RegistryApiError, match="authentication key is unavailable"):
+        await client._client_credentials_token()
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("extra", [
+    {"client_private_key_file": "/unused/key.pem"},
+    {"client_key_id": "own-key"},
+    {"client_private_key_file": "/unused/key.pem", "client_key_id": "own-key", "client_secret": "forbidden"},
+    {"client_private_key_file": "/unused/key.pem", "client_key_id": "own-key", "use_cli_session": True},
+])
+def test_machine_key_configuration_cannot_borrow_personal_or_secret_authentication(extra):
+    with pytest.raises(ValueError, match="private_key_jwt"):
+        RegistryApiConfig(base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+                          client_id="own-connector", **extra)
 
 
 @pytest.mark.asyncio

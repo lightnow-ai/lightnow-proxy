@@ -17,6 +17,8 @@ from urllib.parse import quote
 
 import httpx
 import jwt
+from authlib.integrations.httpx_client import AsyncOAuth2Client
+from authlib.oauth2.rfc7523 import PrivateKeyJWT
 from filelock import FileLock, Timeout as FileLockTimeout
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 
@@ -908,18 +910,32 @@ class RegistryApiClient:
             raise RegistryApiError("LightNow session metadata does not match its access token subject")
 
     async def _client_credentials_token(self) -> str | None:
-        if self.config.token_url is None or not self.config.client_id or not self.config.client_secret:
+        if self.config.token_url is None or not self.config.client_id:
+            return None
+        private_key = None
+        if self.config.client_private_key_file:
+            try:
+                key_file = Path(os.path.expandvars(self.config.client_private_key_file)).expanduser()
+                private_key = key_file.read_text()
+            except OSError:
+                raise RegistryApiError("Connector client authentication key is unavailable") from None
+        elif not self.config.client_secret:
             return None
 
         data = {
             "grant_type": "client_credentials",
             "client_id": self.config.client_id,
-            "client_secret": self.config.resolved_client_secret() or "",
         }
+        if private_key is None:
+            data["client_secret"] = self.config.resolved_client_secret() or ""
         if self.config.audience:
             data["audience"] = self.config.audience
+        if self.config.client_scope:
+            data["scope"] = self.config.client_scope
 
-        credentials_key = hashlib.sha256(json.dumps([str(self.config.token_url), data], sort_keys=True).encode()).hexdigest()
+        credentials_key = hashlib.sha256(json.dumps(
+            [str(self.config.token_url), data, private_key, self.config.client_key_id], sort_keys=True,
+        ).encode()).hexdigest()
         async with self._client_credentials_lock:
             if (self._access_token is not None and self._client_credentials_key == credentials_key
                     and monotonic() < self._access_token_deadline):
@@ -927,10 +943,22 @@ class RegistryApiClient:
             self._access_token = None
             self._access_token_deadline = 0.0
             started = monotonic()
-            async with self._http_client() as client:
-                response = await client.post(str(self.config.token_url), data=data)
-                response.raise_for_status()
-                payload = response.json()
+            if private_key is not None:
+                # Standard RFC7523 client authentication; access tokens are
+                # issued only by the configured authorization server.
+                async with AsyncOAuth2Client(
+                    self.config.client_id, private_key, token_endpoint_auth_method="private_key_jwt",
+                    verify=self._verify(), timeout=self.config.timeout_seconds, follow_redirects=False,
+                ) as client:
+                    client.register_client_auth_method(PrivateKeyJWT(
+                        str(self.config.token_url), headers={"kid": self.config.client_key_id}, alg="RS256",
+                    ))
+                    payload = await client.fetch_token(str(self.config.token_url), **data)
+            else:
+                async with self._http_client() as client:
+                    response = await client.post(str(self.config.token_url), data=data)
+                    response.raise_for_status()
+                    payload = response.json()
             token = payload.get("access_token")
             if not isinstance(token, str) or token == "":
                 raise RegistryApiError("Registry token endpoint did not return an access_token")
