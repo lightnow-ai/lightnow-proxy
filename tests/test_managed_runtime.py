@@ -99,10 +99,10 @@ async def managed_upstream(transport: str, tmp_path: Path, *, read_name: str = "
         server.write_text('''from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 mcp = MCPServer("managed")
-@mcp.tool()
+@mcp.tool(name=READ_NAME)
 def read(value: str) -> str:
     with Path(TRACE).open("a") as output:
-        output.write("read\\n")
+        output.write(READ_NAME + "\\n")
     return value
 @mcp.tool()
 def write(value: str) -> str:
@@ -110,7 +110,7 @@ def write(value: str) -> str:
         output.write("write\\n")
     return value
 mcp.run(transport="stdio")
-'''.replace("TRACE", repr(str(trace))))
+'''.replace("TRACE", repr(str(trace))).replace("READ_NAME", repr(read_name)))
         yield {"transport": "stdio", "command": sys.executable, "args": [str(server)]}, lambda: trace.read_text().splitlines() if trace.exists() else []
         return
     calls = []
@@ -449,11 +449,15 @@ async def test_runtime_rejects_invalid_authorization_response_without_broadening
 
 
 @pytest.mark.asyncio
-async def test_managed_names_stay_bound_to_assignment_through_alias_collision_rename_and_replacement(tmp_path):
+@pytest.mark.parametrize("first_transport,second_transport", [("http", "http"), ("http", "stdio"), ("stdio", "http"), ("stdio", "stdio")])
+async def test_managed_names_stay_bound_to_assignment_through_alias_collision_rename_and_replacement(tmp_path, first_transport, second_transport):
     other = str(uuid4())
     other_connection = str(uuid4())
-    async with managed_upstream("http", tmp_path, read_name="_read") as (first_config, first_calls):
-        async with managed_upstream("http", tmp_path) as (second_config, second_calls):
+    first_path, second_path = tmp_path / "first", tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+    async with managed_upstream(first_transport, first_path, read_name="_read") as (first_config, first_calls):
+        async with managed_upstream(second_transport, second_path) as (second_config, second_calls):
             router = managed_router(tmp_path)
             router.registry_client.runtime_client_id = CLIENT
             # Both had the same old alias-based wire name: docs___read.
@@ -526,7 +530,8 @@ async def test_managed_names_stay_bound_to_assignment_through_alias_collision_re
                 assert str(unwrap_error(replaced.value)) == "MANAGED_CONTEXT_MISMATCH"
                 required = False
                 # Even an exact local override cannot inherit the detached name.
-                router.config.upstreams[TOOL_PREFIX] = UpstreamConfig(url=second_config["url"])
+                router.config.upstreams[TOOL_PREFIX] = UpstreamConfig(**{**second_config,
+                    "transport": "streamable-http" if second_transport == "http" else "stdio"})
                 router.config.profiles["default"].upstreams.append(TOOL_PREFIX)
                 with pytest.raises(Exception):
                     await router.call_tool("default", first_wire, {"value": "stale"})
