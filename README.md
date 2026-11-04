@@ -233,8 +233,11 @@ available with `lightnow-proxy[keyring]`. Resolution failures are fail-closed
 and plaintext values are never added to the tool-schema cache.
 
 Version-pinned KV2 references are read using their exact Vault version. The
-reader checks the returned version and, for LightNow write operations, the
-operation identifier before injecting a value. A missing or mismatched version
+reader checks the returned version, rejects deleted/destroyed versions and, for
+LightNow write operations, verifies the operation identifier before injecting a
+value. The installed reader declares `secret-store.versioned-read.v1` in the
+existing device registration and runtime header independently of any writer.
+A missing or mismatched version
 fails the request; it never falls back to the latest Vault value.
 
 An enrolled organization connector authenticates with its own OAuth client and
@@ -246,6 +249,108 @@ This mode cannot share a personal CLI session or fall back to a client secret.
 Machine tokens renew before expiry, and replacing the local key invalidates the
 cached token. These authentication settings alone do not enroll or authorize a
 connector; the server must separately admit its current enrollment and provider.
+
+### Opt-in private Secret Store worker
+
+The worker is disabled by default. Its journal requires native POSIX ownership
+and a private `0700` directory; unsupported ownership validation fails configuration.
+Existing nonprivate directories are rejected without changing their permissions.
+Enable it only on the enrolled executor with
+an explicit local provider mapping. It executes server-issued KV2 writes and
+exact-version readbacks; it never invents a Vault path or migrates existing
+secrets. Registry authorization, provider/Store policy and current enrollment
+remain required on every claim and result.
+
+For a personal proxy, keep the normal identity-bound generated CLI configuration
+(`registry_api.use_cli_session`, `expected_issuer`, `expected_subject` and observed
+`local_proxy` device/client IDs). It must use the personal context, with no tenant
+in either configuration or the current CLI session. Add:
+
+```yaml
+runtime_secrets:
+  worker_enabled: true
+  journal_path: ~/.lightnow/secret-store/operations.sqlite3
+  poll_interval_seconds: 5
+  providers:
+    11111111-1111-4111-8111-111111111111: # Replace with the enrolled provider ID.
+      auth_mode: vault-proxy
+      vault_proxy_url: http://127.0.0.1:8200
+```
+
+Start the regular MCP proxy:
+
+```sh
+lightnow-proxy --config ~/.lightnow/lightnow-proxy/default.yaml --transport stdio
+```
+
+Its existing heartbeat receives personal work and schedules the actual worker.
+Only after the worker validates its fresh personal session does registration and
+the runtime header include `secret-store.operations.v1`. Switching the CLI session
+to an organization disables this personal writer; it does not become a tenant
+writer. A normal tenant proxy can still read authorized versioned references
+using the separate reader capability, without enabling the worker.
+
+An organization connector uses its separately enrolled machine identity and an
+explicit connector ID. It runs outbound only, without an MCP/HTTP listener:
+
+```yaml
+auth:
+  enabled: false
+  issuer: https://identity.example/realms/lightnow
+registry_api:
+  enabled: true
+  base_url: https://registry-api.example/v0.1
+  expected_issuer: https://identity.example/realms/lightnow
+  token_url: https://identity.example/realms/lightnow/protocol/openid-connect/token
+  client_id: enrolled-connector-client
+  client_private_key_file: ~/.lightnow/secret-store/connector.pem
+  client_key_id: enrolled-key-id
+  client_scope: secret-store.operations.v1
+local_proxy:
+  enabled: false
+runtime_secrets:
+  worker_enabled: true
+  connector_id: 22222222-2222-4222-8222-222222222222
+  journal_path: ~/.lightnow/secret-store/connector.sqlite3
+  poll_interval_seconds: 5
+  providers:
+    11111111-1111-4111-8111-111111111111:
+      auth_mode: vault-proxy
+      vault_proxy_url: http://127.0.0.1:8200
+profiles:
+  worker: {}
+upstreams: {}
+```
+
+Replace the example origins/IDs with the exact enrollment values and protect the
+configuration/key with mode `0600`. Use `registry_api.ca_file` for a private
+Registry/identity CA. Provider mappings support the existing local Vault Proxy
+and TLS/keyring settings; no bootstrap credential is delivered by Registry.
+
+```sh
+lightnow-proxy --config ~/.lightnow/secret-store/connector.yaml --secret-store-worker
+```
+
+Stop either process with Ctrl-C (or the owning service's normal TERM stop).
+Restart with the same configuration and journal. Set `worker_enabled: false` to
+stop automatic execution on the next startup. An organization connector cannot
+start in the ordinary server mode and cannot borrow a personal token or client
+secret. It processes only its current machine-authorized organization/provider
+pool; reading the resulting MCP credential remains the normal tenant proxy's job.
+
+The separate SQLite journal contains only identity/operation/claim IDs, phase and
+expiry. It stores the request ID durably **before** claiming and records dispatch
+**before** IO. A namespace lock serializes processes across claim/IO/result; the
+namespace binds API, issuer, subject, OAuth client and exact runtime client or
+connector. Files use `0600`, the parent directory `0700`. No values, value hashes
+or claim payloads are journaled. Lost responses and restarts reuse the same
+request ID and can only read back an already dispatched write. Unknown outcomes
+and authorization errors retain the nonce; local clock/TTL expiry never permits
+a new write. Only a confirmed terminal receipt or the authorized server response
+`data: null` completes it. Terminal tombstones remain at least ten minutes;
+the journal caps at 1,024 rows and stops new admissions when full. Do not delete
+or reset a journal to retry uncertain work. Restore the original identity and
+let the server's canonical expiry/receipt reconcile it instead.
 
 ### Managed runtime files
 

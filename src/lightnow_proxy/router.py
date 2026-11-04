@@ -21,11 +21,12 @@ from lightnow_proxy import __version__
 from lightnow_proxy.config import ProfileConfig, ProxyConfig, UpstreamConfig
 from lightnow_proxy.diagnostics import diagnostic_for_exception
 from lightnow_proxy.managed_events import EvidenceStoreError, ManagedEventOutbox
-from lightnow_proxy.registry import MANAGED_CAPABILITY, ManagedRuntime, ManagedToolDenied, RegistryApiClient, RegistryApiError, managed_tool_namespace
+from lightnow_proxy.registry import ManagedRuntime, ManagedToolDenied, RegistryApiClient, RegistryApiError, managed_tool_namespace
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
 from lightnow_proxy.request_context import get_current_mcp_client_context, get_current_principal
 from lightnow_proxy.upstream import ToolDiscoveryError, ToolInventory, UpstreamMCPClient
 from lightnow_proxy.version_inventory import heartbeat_version_fields
+from lightnow_proxy.secret_worker import SecretStoreWorker
 
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
@@ -128,6 +129,8 @@ class ToolRouter:
             if config.registry_api and config.registry_api.enabled
             else None
         )
+        self._secret_worker = SecretStoreWorker(config, self.registry_client) if config.runtime_secrets.worker_enabled and self.registry_client else None
+        self._secret_worker_task: asyncio.Task[None] | None = None
         self.client_context = ClientRuntimeContext()
         self.device_heartbeat_last_attempt_at: datetime | None = None
         self.device_heartbeat_last_success_at: datetime | None = None
@@ -887,7 +890,7 @@ class ToolRouter:
         """Return whether this observed Local Proxy has enough data to report presence."""
         return bool(
             self.config.local_proxy.enabled
-            and (self.config.local_proxy.telemetry_enabled or self.config.local_proxy.sync_from_lightnow)
+            and (self.config.local_proxy.telemetry_enabled or self.config.local_proxy.sync_from_lightnow or self._secret_worker is not None)
             and self.registry_client is not None
             and self.config.local_proxy.device_installation_id
             and self.config.local_proxy.client_instance_id
@@ -899,6 +902,9 @@ class ToolRouter:
         if not self.device_heartbeat_enabled() or self.registry_client is None:
             return False
         local_proxy = self.config.local_proxy
+        if self._secret_worker is not None and not await self._secret_worker.prepare():
+            self.device_heartbeat_last_error = "SECRET_WORKER_IDENTITY_UNAVAILABLE"
+            return False
         self.device_heartbeat_last_attempt_at = datetime.now(UTC)
         device_versions, runner_versions = heartbeat_version_fields(local_proxy)
         applications = self._pending_managed_applications() if local_proxy.sync_from_lightnow else {}
@@ -912,7 +918,8 @@ class ToolRouter:
                 "name": self.client_context.name or local_proxy.client_name,
                 "version": self.client_context.version or local_proxy.client_version,
                 "profile": local_proxy.profile,
-                **({"managed_capabilities": [MANAGED_CAPABILITY]} if local_proxy.sync_from_lightnow else {}),
+                **({"managed_capabilities": self.registry_client.runtime_capabilities()}
+                   if local_proxy.sync_from_lightnow or self._secret_worker else {}),
                 **({"managed_applications": [{"observation_id": observation, "context_proof": managed.context_proof}
                                               for managed, observation in applications.values()]} if applications else {}),
                 "runner_name": local_proxy.runner_name,
@@ -930,6 +937,9 @@ class ToolRouter:
             for client in result.get("device", {}).get("clients", []):
                 if client.get("client_instance_id") == str(local_proxy.client_instance_id):
                     self.registry_client.runtime_client_id = str(UUID(client["id"]))
+            if self._secret_worker is not None and self.registry_client.runtime_client_id is not None:
+                if self._secret_worker_task is None or self._secret_worker_task.done():
+                    self._secret_worker_task = asyncio.create_task(self._secret_worker.personal_pending(result.get("secret_store_operations", [])))
             if local_proxy.sync_from_lightnow and self.registry_client.runtime_client_id is not None:
                 if applications:
                     self._acknowledge_managed_applications(applications, result.get("managed_application_acks"))
@@ -951,11 +961,15 @@ class ToolRouter:
                 await asyncio.sleep(self._heartbeat_interval())
         finally:
             tasks = list(self._discovery_tasks.values())
+            if self._secret_worker_task is not None:
+                tasks.append(self._secret_worker_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _heartbeat_interval(self) -> int:
+    def _heartbeat_interval(self) -> float:
+        if self._secret_worker is not None:
+            return self.config.runtime_secrets.poll_interval_seconds
         return MANAGED_HEARTBEAT_INTERVAL_SECONDS if self.config.local_proxy.sync_from_lightnow else DEVICE_HEARTBEAT_INTERVAL_SECONDS
 
     def _schedule_discoveries(self, requests: Any) -> None:

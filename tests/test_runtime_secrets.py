@@ -108,7 +108,9 @@ async def test_rejects_incomplete_operation_locators_before_contacting_vault(loc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata,operation", [({}, "own-operation"), ({"version": 3}, "own-operation"),
-                                              ({"version": True}, "own-operation"), ({"version": 2}, "other-operation")])
+                                              ({"version": True}, "own-operation"), ({"version": 2}, "other-operation"),
+                                              ({"version": 2, "destroyed": True}, "own-operation"),
+                                              ({"version": 2, "deletion_time": "2026-11-04T00:00:00Z"}, "own-operation")])
 async def test_never_injects_an_unconfirmed_vault_version_or_operation(metadata, operation) -> None:
     context = runtime_context()
     context["external_secret_bindings"][0]["locator"].update(version=2, operation_id="own-operation")

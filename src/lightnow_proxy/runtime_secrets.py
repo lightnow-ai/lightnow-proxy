@@ -84,7 +84,8 @@ class RuntimeSecretResolver:
         if version is not None:
             metadata = data.get("metadata")
             returned_version = metadata.get("version") if isinstance(metadata, dict) else None
-            if type(returned_version) is not int or returned_version != version:
+            if (type(returned_version) is not int or returned_version != version
+                    or metadata.get("destroyed") is True or bool(metadata.get("deletion_time"))):
                 raise RuntimeSecretError(f"Runtime Vault provider {provider_id} did not confirm the pinned version")
         if operation_id is not None and secret_data.get("_lightnow_operation_id") != operation_id:
             raise RuntimeSecretError(f"Runtime Vault provider {provider_id} did not confirm the pinned operation")

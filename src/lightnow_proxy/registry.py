@@ -202,6 +202,8 @@ class CliSession:
 
 
 MANAGED_CAPABILITY = "managed-connections.v1"
+VERSIONED_READ_CAPABILITY = "secret-store.versioned-read.v1"
+SECRET_STORE_CAPABILITY = "secret-store.operations.v1"
 
 
 def managed_tool_namespace(assignment_id: str | UUID) -> str:
@@ -318,6 +320,7 @@ class RegistryApiClient:
         self._client_credentials_lock = asyncio.Lock()
         self._tenant_id: str | None = None
         self.runtime_client_id: str | None = None
+        self.secret_worker: Any = None
 
     def _verify(self) -> str | bool:
         return self.config.resolved_ca_file() or True
@@ -552,6 +555,68 @@ class RegistryApiClient:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
 
+    def runtime_capabilities(self) -> list[str]:
+        capabilities = [MANAGED_CAPABILITY]
+        if self.runtime_secret_resolver is not None:
+            capabilities.append(VERSIONED_READ_CAPABILITY)
+        if self.secret_worker is not None and self.secret_worker.active:
+            capabilities.append(SECRET_STORE_CAPABILITY)
+        return capabilities
+
+    async def secret_worker_authorization(
+        self, connector_id: str | None, runtime_client_id: str | None,
+    ) -> tuple[tuple[str, ...], dict[str, str]]:
+        """Fresh consistency binding; the Registry still verifies and authorizes every JWT."""
+        expected_issuer = self.config.expected_issuer
+        if not expected_issuer:
+            raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        if connector_id is None:
+            if not self.config.use_cli_session or not self.config.expected_subject:
+                raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+            session = await self._cli_session()
+            if self.config.cli_tenant_id or session.tenant_id or session.raw.get("context_type") == "tenant":
+                raise RegistryApiError("SECRET_WORKER_PERSONAL_CONTEXT_REQUIRED")
+            claims = session.token_claims()
+            if claims.get("azp") != session.client_id:
+                raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+            token, client_id = session.access_token, session.client_id
+            executor_id = runtime_client_id or "unregistered"
+            kind = "personal_proxy"
+        else:
+            if self.config.use_cli_session or self.config.client_secret or not self.config.client_private_key_file:
+                raise RegistryApiError("SECRET_WORKER_MACHINE_REQUIRED")
+            token = await self._client_credentials_token()
+            try:
+                claims = jwt.decode(token or "", options={"verify_signature": False, "verify_exp": False})
+            except jwt.PyJWTError:
+                raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH") from None
+            client_id = self.config.client_id
+            if (claims.get("azp") != client_id
+                    or SECRET_STORE_CAPABILITY not in str(claims.get("scope", "")).split()):
+                raise RegistryApiError("SECRET_WORKER_MACHINE_REQUIRED")
+            executor_id, kind = connector_id, "org_connector"
+        issuer, subject = claims.get("iss"), claims.get("sub")
+        if (not isinstance(issuer, str) or issuer.rstrip("/") != expected_issuer.rstrip("/")
+                or not isinstance(subject, str) or not subject or not isinstance(client_id, str)):
+            raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        identity = (str(self.config.base_url).rstrip("/"), issuer.rstrip("/"), subject, client_id, kind, executor_id)
+        return identity, {"Authorization": f"Bearer {token}"}
+
+    async def secret_operation_request(
+        self, path: str, payload: dict[str, Any], identity: tuple[str, ...],
+        *, connector_id: str | None, runtime_client_id: str | None,
+    ) -> dict[str, Any]:
+        current, headers = await self.secret_worker_authorization(connector_id, runtime_client_id)
+        if current != identity:
+            raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        async with self._http_client() as client:
+            response = await client.post(self._api_url(path), headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+        if not isinstance(result, dict) or "data" not in result:
+            raise RegistryApiError("INVALID_SECRET_OPERATION_RESPONSE")
+        return result
+
     async def post_device_heartbeat(
         self,
         installation_id: str,
@@ -574,7 +639,9 @@ class RegistryApiClient:
     ) -> dict[str, Any]:
         headers = await self._authorization_headers()
         if include_secrets:
-            headers["X-LightNow-Runtime-Capabilities"] = MANAGED_CAPABILITY
+            if self.secret_worker is not None and self.secret_worker.active:
+                await self.secret_worker_authorization(None, self.runtime_client_id)
+            headers["X-LightNow-Runtime-Capabilities"] = ",".join(self.runtime_capabilities())
             if self.runtime_client_id is not None:
                 headers["X-LightNow-Runtime-Client"] = self.runtime_client_id
         url = self._api_url(f"/integrations/profiles/{profile_name}/servers")

@@ -259,6 +259,10 @@ class RuntimeSecretProviderConfig(BaseModel):
 
 
 class RuntimeSecretsConfig(BaseModel):
+    worker_enabled: bool = False
+    connector_id: UUID | None = None
+    journal_path: str = "~/.lightnow/secret-store/operations.sqlite3"
+    poll_interval_seconds: float = Field(default=5.0, ge=1, le=60)
     providers: dict[str, RuntimeSecretProviderConfig] = Field(default_factory=dict)
 
 
@@ -281,6 +285,19 @@ class ProxyConfig(BaseModel):
             and self.registry_api.expected_issuer is None
         ):
             self.registry_api.expected_issuer = self.auth.issuer
+        if self.runtime_secrets.worker_enabled:
+            registry = self.registry_api
+            if not registry or not registry.enabled or not self.runtime_secrets.providers or not registry.expected_issuer:
+                raise ValueError("Secret worker requires Registry authentication, an expected issuer and local providers")
+            if self.runtime_secrets.connector_id:
+                if (registry.use_cli_session or registry.client_secret or not registry.client_private_key_file
+                        or self.local_proxy.enabled):
+                    raise ValueError("Organization secret worker requires dedicated private_key_jwt and headless mode")
+            elif (not registry.use_cli_session or not registry.expected_subject or registry.cli_tenant_id
+                  or not self.local_proxy.enabled or self.local_proxy.scope_type != "personal"
+                  or not self.local_proxy.device_installation_id or not self.local_proxy.client_instance_id
+                  or not self.local_proxy.device_hostname):
+                raise ValueError("Personal secret worker requires a bound personal CLI session and observed local client")
         return self
 
     @field_validator("profiles")
