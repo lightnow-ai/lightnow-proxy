@@ -352,6 +352,22 @@ the journal caps at 1,024 rows and stops new admissions when full. Do not delete
 or reset a journal to retry uncertain work. Restore the original identity and
 let the server's canonical expiry/receipt reconcile it instead.
 
+An active worker with the OAuth executor also advertises `secret-store.oauth.v1`.
+Its typed `oauth.write`, `oauth.refresh` and `oauth.readback` claims keep access
+headers and refresh grants at separate server-bound KV2 paths. Native Authlib
+uses the recorded client authentication, redirect URI and MCP resource for one
+refresh; an omitted refresh token retains the prior token. Both exact-version
+readbacks must match before the worker attests the pair. Only Registry activates
+the references after current authorization. No token values are journaled.
+
+Lost refresh responses or partial KV writes remain uncertain. Restart uses the
+same request ID and **GET-only** pair readback, never another refresh or POST.
+Missing material requires reconciliation or explicit reconnect; there is no
+fallback to LightNow storage. OAuth HTTPS uses the normal trusted CA configuration
+(including `SSL_CERT_FILE` for an explicitly trusted private CA), without disabling
+certificate verification or following redirects. Deployment still requires the
+matching Registry protocol and its separately authorized connector enrollment.
+
 ### Managed runtime files
 
 STDIO servers may attach bounded, non-secret `runtime_files` to their Runtime

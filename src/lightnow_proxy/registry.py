@@ -204,6 +204,7 @@ class CliSession:
 MANAGED_CAPABILITY = "managed-connections.v1"
 VERSIONED_READ_CAPABILITY = "secret-store.versioned-read.v1"
 SECRET_STORE_CAPABILITY = "secret-store.operations.v1"
+OAUTH_STORE_CAPABILITY = "secret-store.oauth.v1"
 
 
 def managed_tool_namespace(assignment_id: str | UUID) -> str:
@@ -561,6 +562,8 @@ class RegistryApiClient:
             capabilities.append(VERSIONED_READ_CAPABILITY)
         if self.secret_worker is not None and self.secret_worker.active:
             capabilities.append(SECRET_STORE_CAPABILITY)
+            if self.secret_worker.oauth_executor is not None:
+                capabilities.append(OAUTH_STORE_CAPABILITY)
         return capabilities
 
     async def secret_worker_authorization(
@@ -609,6 +612,7 @@ class RegistryApiClient:
         current, headers = await self.secret_worker_authorization(connector_id, runtime_client_id)
         if current != identity:
             raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        headers["X-LightNow-Runtime-Capabilities"] = ",".join(self.runtime_capabilities())
         async with self._http_client() as client:
             response = await client.post(self._api_url(path), headers=headers, json=payload)
             response.raise_for_status()
@@ -741,6 +745,7 @@ class RegistryApiClient:
             client_config = item.get("client_config")
             if not isinstance(client_config, dict):
                 raise RegistryApiError(f"Custom profile server {alias!r} is missing client_config")
+            client_config = await self._resolve_profile_client_config(item, client_config)
             return ResolvedRuntimeUpstream(
                 name=alias,
                 config=self._profile_client_upstream_config(

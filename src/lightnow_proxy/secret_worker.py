@@ -19,7 +19,7 @@ from filelock import FileLock, Timeout
 
 from lightnow_proxy.config import ProxyConfig, expand_env
 from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
-from lightnow_proxy.secret_operations import SecretOperation, SecretOperationExecutor
+from lightnow_proxy.secret_operations import OAuthOperation, OAuthOperationExecutor, SecretOperation, SecretOperationExecutor
 
 if TYPE_CHECKING:
     from lightnow_proxy.registry import RegistryApiClient
@@ -99,10 +99,10 @@ class SecretOperationJournal:
         with closing(self.connect()) as db:
             return [dict(row) for row in db.execute("SELECT * FROM requests WHERE namespace=? AND terminal_at IS NULL ORDER BY created_at,request_id", (namespace,))]
 
-    def stage(self, row: dict[str, Any], operation: SecretOperation) -> None:
+    def stage(self, row: dict[str, Any], operation: SecretOperation | OAuthOperation) -> None:
         if row["operation_id"] is not None and row["operation_id"] != str(operation.operation_id):
             raise SecretWorkerError()
-        if operation.claim.action == "kv2.write" and row["dispatched"]:
+        if operation.claim.action in ("kv2.write", "oauth.write", "oauth.refresh") and row["dispatched"]:
             raise SecretWorkerError()
         with closing(self.connect()) as db, db:
             changed = db.execute("UPDATE requests SET operation_id=?,claim_id=?,claim_revision=?,claim_expires_at=?,dispatched=1 WHERE namespace=? AND request_id=? AND terminal_at IS NULL",
@@ -123,6 +123,7 @@ class SecretStoreWorker:
         self.connector_id = str(settings.connector_id) if settings.connector_id else None
         self.journal = SecretOperationJournal(Path(expand_env(settings.journal_path)).expanduser())
         self.executor = SecretOperationExecutor(RuntimeSecretResolver(settings))
+        self.oauth_executor = OAuthOperationExecutor(self.executor.resolver)
         self.active = False
         self.last_error: str | None = None
         self.registry.secret_worker = self
@@ -152,13 +153,15 @@ class SecretStoreWorker:
         if response["data"] is None:
             self.journal.finish(row)
             return
-        operation = SecretOperation.model_validate(response["data"])
+        data = response["data"]
+        operation = (OAuthOperation.model_validate(data) if data.get("schema") == "secret-store.oauth.v1"
+                     else SecretOperation.model_validate(data))
         self.journal.stage(row, operation)
         # A context switch after claim cannot dispatch material under a new session.
         current, _ = await self.registry.secret_worker_authorization(self.connector_id, runtime_id)
         if current != identity:
             raise SecretWorkerError()
-        result = await self.executor.execute(operation)
+        result = await (self.oauth_executor if isinstance(operation, OAuthOperation) else self.executor).execute(operation)
         result_path = (root + f"/{operation.operation_id}/result") if self.connector_id else root + "/result"
         if not self.connector_id:
             result["runtime_client_id"] = runtime_id
