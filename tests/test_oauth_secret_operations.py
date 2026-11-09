@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 import json
+import zlib
 from urllib.parse import parse_qs
 from uuid import uuid4
 
@@ -57,14 +58,38 @@ def oauth_executor(body):
 
 
 def token_transport(monkeypatch, handler):
-    native = operations.AsyncOAuth2Client
+    native = operations.BoundedOAuth2Client
     requests = []
     def capture(request):
         requests.append(request)
         return handler(request)
-    monkeypatch.setattr(operations, "AsyncOAuth2Client",
+    monkeypatch.setattr(operations, "BoundedOAuth2Client",
                         lambda *args, **kwargs: native(*args, **kwargs, transport=httpx2.MockTransport(capture)))
     return requests
+
+
+class TokenResponseStream(httpx2.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.consumed = 0
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.consumed += 1
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
+def token_stream_response(chunks, compressed):
+    if compressed:
+        compressor = zlib.compressobj(wbits=31)
+        chunks = [compressor.compress(chunk) + compressor.flush(zlib.Z_SYNC_FLUSH) for chunk in chunks]
+        chunks[-1] += compressor.flush(zlib.Z_FINISH)
+    stream = TokenResponseStream(chunks)
+    return httpx2.Response(200, headers={"Content-Encoding": "gzip"} if compressed else {}, stream=stream), stream
 
 
 @pytest.mark.asyncio
@@ -88,14 +113,16 @@ async def test_oauth_write_atomically_attests_separate_roles_without_exposing_ma
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rotated", [True, False])
-async def test_native_authlib_refresh_preserves_resource_clientauth_and_missing_refresh_token(rotated, monkeypatch):
+@pytest.mark.parametrize("compressed", [True, False])
+async def test_native_authlib_refresh_preserves_resource_clientauth_and_missing_refresh_token(rotated, compressed, monkeypatch):
     body = oauth_claim("oauth.refresh")
     body["metadata"]["hasRefreshToken"] = True
     saved = {}
-    token = token_transport(monkeypatch, lambda _: httpx2.Response(200, json={
+    response, stream = token_stream_response([json.dumps({
         "access_token": "rotated-access", "token_type": "Bearer", "expires_in": 3600,
         **({"refresh_token": "rotated-refresh"} if rotated else {}),
-    }))
+    }).encode()], compressed)
+    token = token_transport(monkeypatch, lambda _: response)
     def write(role):
         def capture(request):
             data = json.loads(request.content)
@@ -114,6 +141,7 @@ async def test_native_authlib_refresh_preserves_resource_clientauth_and_missing_
         result = await oauth_executor(body).execute(OAuthOperation.model_validate(body))
     assert result["status"] == "succeeded"
     assert len(token) == 1
+    assert stream.closed and stream.consumed == 1
     assert token[0].headers["Authorization"].startswith("Basic ")
     assert parse_qs(token[0].content.decode()) == {
         "grant_type": ["refresh_token"], "refresh_token": ["initial-refresh"], "resource": [body["metadata"]["endpoint"]],
@@ -127,6 +155,28 @@ async def test_native_authlib_refresh_preserves_resource_clientauth_and_missing_
     assert next_grant["metadata"]["hasRefreshToken"] is True
     assert result["oauth"]["expires_at"] == next_grant["metadata"]["expiresAt"]
     assert result["oauth"]["expires_at"] > int(datetime.now(UTC).timestamp())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compressed", [True, False])
+async def test_oversized_native_oauth_stream_stops_before_remaining_body_and_never_writes(compressed, monkeypatch):
+    body = oauth_claim("oauth.refresh")
+    response, stream = token_stream_response(
+        [b" " * 8192] * 9 + [b'{"access_token":"must-not-be-used"}'], compressed,
+    )
+    if compressed:
+        assert sum(map(len, stream.chunks)) < operations.RuntimeSecretResolver.MAX_RESPONSE_BYTES
+    token = token_transport(monkeypatch, lambda _: response)
+    with respx.mock as transport:
+        reference = body["grant_reference"]
+        transport.get(url(body, "grant"), params={"version": 1}).respond(
+            200, json=kv(json.dumps(grant(body)), reference["operation_id"], 1))
+        result = await oauth_executor(body).execute(OAuthOperation.model_validate(body))
+        assert len(transport.calls) == 1  # Only the pinned grant read; no partial Vault writes.
+    assert len(token) == 1 and stream.closed
+    assert stream.consumed < len(stream.chunks)
+    assert result["status"] == "outcome_unknown" and result["error_code"] == "VAULT_IO_UNCONFIRMED"
+    assert "must-not-be-used" not in repr(result)
 
 
 @pytest.mark.asyncio

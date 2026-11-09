@@ -153,6 +153,29 @@ class _VaultRefusal(Exception):
         super().__init__(code)
 
 
+class BoundedOAuth2Client(AsyncOAuth2Client):
+    """Keep native OAuth authentication while bounding decoded token-response IO."""
+
+    async def send(self, request: httpx2.Request, *, stream: bool = False, **kwargs: Any) -> httpx2.Response:
+        response = await super().send(request, stream=True, **kwargs)
+        try:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes(chunk_size=8192):
+                size += len(chunk)
+                if size > RuntimeSecretResolver.MAX_RESPONSE_BYTES:
+                    raise RuntimeSecretError("OAuth provider response exceeds its size limit")
+                chunks.append(chunk)
+            headers = response.headers.copy()
+            # aiter_bytes already decoded the native HTTP content encoding.
+            headers.pop("content-encoding", None)
+            headers.pop("content-length", None)
+            return httpx2.Response(response.status_code, headers=headers, content=b"".join(chunks),
+                                   request=response.request, extensions=response.extensions, history=response.history)
+        finally:
+            await response.aclose()
+
+
 class SecretOperationExecutor:
     """Only attest exact-version readback; Registry retains final authorization."""
 
@@ -274,12 +297,6 @@ class OAuthOperationExecutor(SecretOperationExecutor):
         return values["value"]
 
     @staticmethod
-    def _bounded_token_response(response: httpx2.Response) -> httpx2.Response:
-        if len(response.content) > RuntimeSecretResolver.MAX_RESPONSE_BYTES:
-            raise RuntimeSecretError("OAuth provider response exceeds its size limit")
-        return response
-
-    @staticmethod
     def _grant(value: str, operation: OAuthOperation) -> dict[str, Any]:
         if len(value.encode()) > 8192:
             raise RuntimeSecretError("OAuth grant exceeds its size limit")
@@ -313,9 +330,8 @@ class OAuthOperationExecutor(SecretOperationExecutor):
                 or not isinstance(client_id, str) or not client_id or not isinstance(client_secret, str)
                 or method not in ("none", "client_secret_basic", "client_secret_post")):
             raise _VaultRefusal("OAUTH_RECONNECT_REQUIRED")
-        async with AsyncOAuth2Client(client_id=client_id, client_secret=client_secret,
-                                     token_endpoint_auth_method=method, follow_redirects=False, timeout=15) as oauth:
-            oauth.register_compliance_hook("refresh_token_response", self._bounded_token_response)
+        async with BoundedOAuth2Client(client_id=client_id, client_secret=client_secret,
+                                      token_endpoint_auth_method=method, follow_redirects=False, timeout=15) as oauth:
             # League's existing renewal passes the MCP resource, without inventing
             # new scopes or registration. Authlib carries a missing refresh token.
             redirect = options.get("redirectUri")
