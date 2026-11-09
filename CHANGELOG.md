@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.12.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.11.0...v1.12.0) (2026-11-09)
+
+
+### Features
+
+* **auth:** support connector private key authentication ([67e5140](https://github.com/lightnow-ai/lightnow-proxy/commit/67e51408a24e511688ecca86f9709d9efcc707ca))
+* **oauth:** execute durable Vault token-pair operations ([2bc7d75](https://github.com/lightnow-ai/lightnow-proxy/commit/2bc7d75c8ebad1c8226b41433f6dc175a9d98c52))
+* **oauth:** execute durable Vault token-pair operations ([c45d2a0](https://github.com/lightnow-ai/lightnow-proxy/commit/c45d2a076bacaa78063121540c3b31e908669dc3))
+* **oauth:** execute durable Vault token-pair operations ([#86](https://github.com/lightnow-ai/lightnow-proxy/issues/86)) ([2bc7d75](https://github.com/lightnow-ai/lightnow-proxy/commit/2bc7d75c8ebad1c8226b41433f6dc175a9d98c52))
+* **secrets:** execute deadline-bound private Vault claims ([63480cc](https://github.com/lightnow-ai/lightnow-proxy/commit/63480cc8367f0ab3fcfb32bea543fe12e77a8d69))
+* **secrets:** run durable private Vault workers and versioned readers ([a6eea50](https://github.com/lightnow-ai/lightnow-proxy/commit/a6eea50fc48a7048853ca18a94b1472e51c99de3))
+* **secrets:** run durable private Vault workers and versioned readers ([#85](https://github.com/lightnow-ai/lightnow-proxy/issues/85)) ([a6eea50](https://github.com/lightnow-ai/lightnow-proxy/commit/a6eea50fc48a7048853ca18a94b1472e51c99de3))
+* **secrets:** run durable private Vault workers with versioned readers ([4643a24](https://github.com/lightnow-ai/lightnow-proxy/commit/4643a24c3174e5787bb7b661d5cb90eab50e3fb7))
+
+
+### Bug Fixes
+
+* **auth:** renew machine tokens before expiry and after rotation ([8e20d77](https://github.com/lightnow-ai/lightnow-proxy/commit/8e20d778c5283a149c3796a7726f9ec8cdff1a06))
+* **oauth:** bound token response streams before buffering ([ede6dbb](https://github.com/lightnow-ai/lightnow-proxy/commit/ede6dbba495a7dfca7686a3ca2dfaa1f10199bfc))
+* **secrets:** resolve exact Vault versions before runtime injection ([3e237ae](https://github.com/lightnow-ai/lightnow-proxy/commit/3e237ae32e0c2d9609340c4071e46f37cdd0ca39))
+
 ## [1.11.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.10.0...v1.11.0) (2026-10-19)
 
 
