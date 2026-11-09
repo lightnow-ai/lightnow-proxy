@@ -27,7 +27,7 @@ from lightnow_proxy.registry import (
     upstream_config_from_client_config,
     upstream_config_from_runtime_context,
 )
-from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
+from lightnow_proxy.runtime_secrets import RuntimeSecretError, RuntimeSecretResolver
 
 
 @pytest.mark.asyncio
@@ -1668,3 +1668,88 @@ async def test_cancelled_release_waits_for_real_file_lock_cleanup(tmp_path) -> N
 
     with FileLock(lock_path, timeout=0.1):
         pass
+
+
+@pytest.fixture
+def custom_oauth_profile_item():
+    # The native Custom profile response: canonical config and a separate,
+    # transport-bound context. Private OAuth contributes only a pinned header.
+    binding = {
+        "provider": {"id": "provider-uuid", "provider_type": "vault_kv_v2", "resolution_mode": "runtime",
+                     "config": {"address": "https://vault.internal"}},
+        "locator": {"path": "secret/data/lightnow/custom/access", "field": "value", "version": 3,
+                    "operation_id": "11111111-2222-4333-8444-555555555555"},
+        "target": {"type": "header", "name": "Authorization"},
+    }
+    return {
+        "alias": "own-oauth-custom", "server_name": "custom:own-oauth-custom", "version": None,
+        "status": "custom", "transport": "http",
+        "client_config": {"transport": "http", "url": "https://canonical.example.test/mcp",
+                          "headers": {"X-Profile": "default"}},
+        "external_secret_bindings": [binding],
+        "context": {"probe_request": {"transport": "http", "http": {
+            "url": "https://canonical.example.test/mcp", "headers": {"X-Profile": "default"}}},
+            "fetch_plan": None, "external_secret_bindings": [binding], "meta": {"source": "custom"}},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_type", ["personal", "tenant"])
+async def test_custom_profile_fetch_resolves_its_pinned_oauth_header(tmp_path, custom_oauth_profile_item, context_type):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "access_token": unsigned_token(int(time.time()) + 3600),
+        "issuer": "https://auth.lightnow.local/realms/lightnow-local", "client_id": "lightnow-cli",
+        "context_type": context_type, **({"context_tenant": "tenant-uuid"} if context_type == "tenant" else {}),
+    }))
+    client = RegistryApiClient(RegistryApiConfig(
+        enabled=True, base_url="https://registry-api.lightnow.local/v0.1", use_cli_session=True,
+        cli_config_path=str(config_path)), RuntimeSecretResolver(RuntimeSecretsConfig()))
+    item = custom_oauth_profile_item
+    with respx.mock(assert_all_called=True) as router:
+        profile = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200, json={"servers": [item]})
+        vault = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/custom/access", params={"version": 3}).respond(
+            200, json={"data": {"data": {"value": "Bearer synthetic-custom-access",
+                "_lightnow_operation_id": item["external_secret_bindings"][0]["locator"]["operation_id"]},
+                "metadata": {"version": 3, "destroyed": False, "deletion_time": ""}}})
+        result = await client.fetch_profile("default", None)
+    assert len(profile.calls) == len(vault.calls) == 1
+    assert profile.calls[0].request.headers.get("X-Tenant") == ("tenant-uuid" if context_type == "tenant" else None)
+    assert len(result.upstreams) == 1
+    upstream = result.upstreams[0]
+    assert upstream.name == "own-oauth-custom" and upstream.server_name == "custom:own-oauth-custom"
+    assert str(upstream.config.url) == "https://canonical.example.test/mcp"
+    assert upstream.config.headers == {"X-Profile": "default", "Authorization": "Bearer synthetic-custom-access"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_type", ["personal", "tenant"])
+@pytest.mark.parametrize("refusal", ["missing-resolver", "acl", "version", "transport"])
+async def test_custom_profile_fetch_fails_closed_when_oauth_header_cannot_be_resolved(
+    tmp_path, custom_oauth_profile_item, context_type, refusal,
+):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "access_token": unsigned_token(int(time.time()) + 3600),
+        "issuer": "https://auth.lightnow.local/realms/lightnow-local", "client_id": "lightnow-cli",
+        "context_type": context_type, **({"context_tenant": "tenant-uuid"} if context_type == "tenant" else {}),
+    }))
+    client = RegistryApiClient(RegistryApiConfig(
+        enabled=True, base_url="https://registry-api.lightnow.local/v0.1", use_cli_session=True,
+        cli_config_path=str(config_path)), None if refusal == "missing-resolver" else RuntimeSecretResolver(RuntimeSecretsConfig()))
+    item = custom_oauth_profile_item
+    if refusal == "transport":
+        item["context"]["probe_request"] = {"transport": "stdio", "stdio": {"cmd": "wrong-transport"}}
+    error = RegistryApiError if refusal in {"missing-resolver", "transport"} else RuntimeSecretError
+    with respx.mock(assert_all_called=False) as router:
+        profile = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200, json={"servers": [item]})
+        vault = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/custom/access", params={"version": 3}).respond(
+            403 if refusal == "acl" else 200, json={"data": {"data": {"value": "Bearer forbidden-fallback",
+                "_lightnow_operation_id": item["external_secret_bindings"][0]["locator"]["operation_id"]},
+                "metadata": {"version": 4, "destroyed": False, "deletion_time": ""}}})
+        with pytest.raises(error):
+            await client.fetch_profile("default", None)
+    assert len(profile.calls) == 1
+    assert len(vault.calls) == (0 if refusal in {"missing-resolver", "transport"} else 1)

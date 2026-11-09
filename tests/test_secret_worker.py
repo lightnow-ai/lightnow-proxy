@@ -93,8 +93,8 @@ async def test_heartbeat_installs_actual_worker_and_both_runtime_capabilities_wi
         assert await router.send_device_heartbeat()
         await router._secret_worker_task
         await router.registry_client._fetch_profile_servers("default", True)
-    assert json.loads(heartbeat.calls[0].request.content)["client"]["managed_capabilities"] == ["managed-connections.v1", "secret-store.versioned-read.v1", "secret-store.operations.v1"]
-    assert profile.calls[0].request.headers["X-LightNow-Runtime-Capabilities"] == "managed-connections.v1,secret-store.versioned-read.v1,secret-store.operations.v1"
+    assert json.loads(heartbeat.calls[0].request.content)["client"]["managed_capabilities"] == ["managed-connections.v1", "secret-store.versioned-read.v1", "secret-store.operations.v1", "secret-store.oauth.v1"]
+    assert profile.calls[0].request.headers["X-LightNow-Runtime-Capabilities"] == "managed-connections.v1,secret-store.versioned-read.v1,secret-store.operations.v1,secret-store.oauth.v1"
     assert profile.calls[0].request.headers["X-LightNow-Runtime-Client"] == runtime_id
     assert written.call_count == reported.call_count == 1
     saved = Path(config.runtime_secrets.journal_path).read_bytes()
