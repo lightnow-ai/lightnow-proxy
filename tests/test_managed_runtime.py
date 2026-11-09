@@ -291,7 +291,7 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
                 return httpx.Response(403)
             item = {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "managed_runtime_required"}
             if request.url.params.get("include") == "secrets":
-                assert request.headers["X-LightNow-Runtime-Capabilities"] == "managed-connections.v1"
+                assert request.headers["X-LightNow-Runtime-Capabilities"] == "managed-connections.v1,secret-store.versioned-read.v1"
                 assert request.headers["X-LightNow-Runtime-Client"] == CLIENT
                 context = managed_context()
                 contexts.append(context)
@@ -421,7 +421,7 @@ async def test_native_heartbeat_negotiates_owned_client_without_optional_telemet
         response = api.post(REGISTRY + f"/integrations/devices/{local.device_installation_id}/clients/{local.client_instance_id}/heartbeat").respond(
             200, json={"device": {"clients": [{"id": CLIENT, "client_instance_id": str(local.client_instance_id)}]}})
         assert await router.send_device_heartbeat()
-        assert json.loads(response.calls.last.request.content)["client"]["managed_capabilities"] == ["managed-connections.v1"]
+        assert json.loads(response.calls.last.request.content)["client"]["managed_capabilities"] == ["managed-connections.v1", "secret-store.versioned-read.v1"]
         assert response.calls.last.request.headers["Authorization"].startswith("Bearer ")
         assert router.registry_client.runtime_client_id == CLIENT
 

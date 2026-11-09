@@ -104,6 +104,26 @@ the active LightNow MCP configuration at runtime.
 4. The Local Proxy fetches the active LightNow MCP config.
 5. LightNow UI controls which upstreams are available.
 
+## Private Vault operation execution
+
+`SecretOperationExecutor` executes a single Registry-issued KV2 claim. The
+strict claim binds the operation, provider, opaque target, CAS version and
+expiry. Writes require an explicit `runtime_secrets.providers` mapping; keyring
+authentication additionally requires a locally configured HTTPS address. Read
+resolution keeps its existing behavior. Both paths share TLS/bootstrap handling
+and bound decompressed Vault responses to 64 KiB before buffering.
+
+A write uses CAS and records the operation marker, then reads the exact new KV2
+version and confirms its marker and bytes before returning a SHA256 attestation.
+Readback claims perform no POST, including when the version is missing. ACL/CAS
+refusals are terminal reports; timeouts, redirects and unconfirmed versions
+remain uncertain. Values exist only in the claim/request memory, not in logs or
+the result. Registry retains final authorization and reference activation.
+
+This executor is the IO part of private workers. Durable claim acquisition,
+polling, connector lifecycle and OAuth integration are separate mandatory parts;
+the executor alone does not enable private Vault management through the UI.
+
 ## Runtime Telemetry
 
 Runtime telemetry emits events for:

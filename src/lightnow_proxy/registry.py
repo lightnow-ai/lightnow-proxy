@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ from urllib.parse import quote
 
 import httpx
 import jwt
+from authlib.integrations.httpx_client import AsyncOAuth2Client
+from authlib.oauth2.rfc7523 import PrivateKeyJWT
 from filelock import FileLock, Timeout as FileLockTimeout
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 
@@ -199,6 +202,8 @@ class CliSession:
 
 
 MANAGED_CAPABILITY = "managed-connections.v1"
+VERSIONED_READ_CAPABILITY = "secret-store.versioned-read.v1"
+SECRET_STORE_CAPABILITY = "secret-store.operations.v1"
 
 
 def managed_tool_namespace(assignment_id: str | UUID) -> str:
@@ -310,8 +315,12 @@ class RegistryApiClient:
         self.runtime_files_connection_id = runtime_files_connection_id
         self.report_receipt_observer = report_receipt_observer
         self._access_token: str | None = None
+        self._access_token_deadline = 0.0
+        self._client_credentials_key: str | None = None
+        self._client_credentials_lock = asyncio.Lock()
         self._tenant_id: str | None = None
         self.runtime_client_id: str | None = None
+        self.secret_worker: Any = None
 
     def _verify(self) -> str | bool:
         return self.config.resolved_ca_file() or True
@@ -546,6 +555,68 @@ class RegistryApiClient:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
 
+    def runtime_capabilities(self) -> list[str]:
+        capabilities = [MANAGED_CAPABILITY]
+        if self.runtime_secret_resolver is not None:
+            capabilities.append(VERSIONED_READ_CAPABILITY)
+        if self.secret_worker is not None and self.secret_worker.active:
+            capabilities.append(SECRET_STORE_CAPABILITY)
+        return capabilities
+
+    async def secret_worker_authorization(
+        self, connector_id: str | None, runtime_client_id: str | None,
+    ) -> tuple[tuple[str, ...], dict[str, str]]:
+        """Fresh consistency binding; the Registry still verifies and authorizes every JWT."""
+        expected_issuer = self.config.expected_issuer
+        if not expected_issuer:
+            raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        if connector_id is None:
+            if not self.config.use_cli_session or not self.config.expected_subject:
+                raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+            session = await self._cli_session()
+            if self.config.cli_tenant_id or session.tenant_id or session.raw.get("context_type") == "tenant":
+                raise RegistryApiError("SECRET_WORKER_PERSONAL_CONTEXT_REQUIRED")
+            claims = session.token_claims()
+            if claims.get("azp") != session.client_id:
+                raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+            token, client_id = session.access_token, session.client_id
+            executor_id = runtime_client_id or "unregistered"
+            kind = "personal_proxy"
+        else:
+            if self.config.use_cli_session or self.config.client_secret or not self.config.client_private_key_file:
+                raise RegistryApiError("SECRET_WORKER_MACHINE_REQUIRED")
+            token = await self._client_credentials_token()
+            try:
+                claims = jwt.decode(token or "", options={"verify_signature": False, "verify_exp": False})
+            except jwt.PyJWTError:
+                raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH") from None
+            client_id = self.config.client_id
+            if (claims.get("azp") != client_id
+                    or SECRET_STORE_CAPABILITY not in str(claims.get("scope", "")).split()):
+                raise RegistryApiError("SECRET_WORKER_MACHINE_REQUIRED")
+            executor_id, kind = connector_id, "org_connector"
+        issuer, subject = claims.get("iss"), claims.get("sub")
+        if (not isinstance(issuer, str) or issuer.rstrip("/") != expected_issuer.rstrip("/")
+                or not isinstance(subject, str) or not subject or not isinstance(client_id, str)):
+            raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        identity = (str(self.config.base_url).rstrip("/"), issuer.rstrip("/"), subject, client_id, kind, executor_id)
+        return identity, {"Authorization": f"Bearer {token}"}
+
+    async def secret_operation_request(
+        self, path: str, payload: dict[str, Any], identity: tuple[str, ...],
+        *, connector_id: str | None, runtime_client_id: str | None,
+    ) -> dict[str, Any]:
+        current, headers = await self.secret_worker_authorization(connector_id, runtime_client_id)
+        if current != identity:
+            raise RegistryApiError("SECRET_WORKER_IDENTITY_MISMATCH")
+        async with self._http_client() as client:
+            response = await client.post(self._api_url(path), headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+        if not isinstance(result, dict) or "data" not in result:
+            raise RegistryApiError("INVALID_SECRET_OPERATION_RESPONSE")
+        return result
+
     async def post_device_heartbeat(
         self,
         installation_id: str,
@@ -568,7 +639,9 @@ class RegistryApiClient:
     ) -> dict[str, Any]:
         headers = await self._authorization_headers()
         if include_secrets:
-            headers["X-LightNow-Runtime-Capabilities"] = MANAGED_CAPABILITY
+            if self.secret_worker is not None and self.secret_worker.active:
+                await self.secret_worker_authorization(None, self.runtime_client_id)
+            headers["X-LightNow-Runtime-Capabilities"] = ",".join(self.runtime_capabilities())
             if self.runtime_client_id is not None:
                 headers["X-LightNow-Runtime-Client"] = self.runtime_client_id
         url = self._api_url(f"/integrations/profiles/{profile_name}/servers")
@@ -904,28 +977,69 @@ class RegistryApiClient:
             raise RegistryApiError("LightNow session metadata does not match its access token subject")
 
     async def _client_credentials_token(self) -> str | None:
-        if self._access_token is not None:
-            return self._access_token
-        if self.config.token_url is None or not self.config.client_id or not self.config.client_secret:
+        if self.config.token_url is None or not self.config.client_id:
+            return None
+        private_key = None
+        if self.config.client_private_key_file:
+            try:
+                key_file = Path(os.path.expandvars(self.config.client_private_key_file)).expanduser()
+                private_key = key_file.read_text()
+            except OSError:
+                raise RegistryApiError("Connector client authentication key is unavailable") from None
+        elif not self.config.client_secret:
             return None
 
         data = {
             "grant_type": "client_credentials",
             "client_id": self.config.client_id,
-            "client_secret": self.config.resolved_client_secret() or "",
         }
+        if private_key is None:
+            data["client_secret"] = self.config.resolved_client_secret() or ""
         if self.config.audience:
             data["audience"] = self.config.audience
+        if self.config.client_scope:
+            data["scope"] = self.config.client_scope
 
-        async with self._http_client() as client:
-            response = await client.post(str(self.config.token_url), data=data)
-            response.raise_for_status()
-            payload = response.json()
-        token = payload.get("access_token")
-        if not isinstance(token, str) or token == "":
-            raise RegistryApiError("Registry token endpoint did not return an access_token")
-        self._access_token = token
-        return token
+        credentials_key = hashlib.sha256(json.dumps(
+            [str(self.config.token_url), data, private_key, self.config.client_key_id], sort_keys=True,
+        ).encode()).hexdigest()
+        async with self._client_credentials_lock:
+            if (self._access_token is not None and self._client_credentials_key == credentials_key
+                    and monotonic() < self._access_token_deadline):
+                return self._access_token
+            self._access_token = None
+            self._access_token_deadline = 0.0
+            started = monotonic()
+            if private_key is not None:
+                # Standard RFC7523 client authentication; access tokens are
+                # issued only by the configured authorization server.
+                async with AsyncOAuth2Client(
+                    self.config.client_id, private_key, token_endpoint_auth_method="private_key_jwt",
+                    verify=self._verify(), timeout=self.config.timeout_seconds, follow_redirects=False,
+                ) as client:
+                    client.register_client_auth_method(PrivateKeyJWT(
+                        str(self.config.token_url), headers={"kid": self.config.client_key_id}, alg="RS256",
+                    ))
+                    payload = await client.fetch_token(str(self.config.token_url), **data)
+            else:
+                async with self._http_client() as client:
+                    response = await client.post(str(self.config.token_url), data=data)
+                    response.raise_for_status()
+                    payload = response.json()
+            token = payload.get("access_token")
+            if not isinstance(token, str) or token == "":
+                raise RegistryApiError("Registry token endpoint did not return an access_token")
+            lifetime = payload.get("expires_in")
+            if lifetime is not None:
+                if type(lifetime) is not int or lifetime <= 0:
+                    raise RegistryApiError("Registry token endpoint returned an invalid expires_in")
+                if monotonic() >= started + lifetime:
+                    raise RegistryApiError("Registry token endpoint returned an expired access_token")
+                # An unknown lifetime is never cached; known tokens renew early.
+                self._access_token_deadline = started + lifetime - min(30, lifetime / 10)
+            self._access_token = token
+            self._client_credentials_key = credentials_key
+            return token
 
     def _scope_id(self, upstream: RuntimeUpstreamConfig, principal: Principal | None) -> str | None:
         if upstream.scope_id:
