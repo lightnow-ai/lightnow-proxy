@@ -1136,42 +1136,44 @@ class ToolRouter:
                     value = str(value)
                 if field not in request or value != request[field]:
                     return
-            if not isinstance(request.get("etag"), str):
-                return
-            expires = datetime.fromisoformat(request["expires_at"])
-            if expires.tzinfo is None or expires <= datetime.now(UTC):
-                return
-            managed.assert_current()
-            started = monotonic()
-            try:
-                async with asyncio.timeout(30):
-                    async with self.upstream_client.session(resolved.config) as client:
-                        inventory = await self.upstream_client.discover_tools(client)
-            except Exception as exc:
-                leaf = unwrap_error(exc)
-                diagnostic = diagnostic_for_exception(leaf)
-                if isinstance(leaf, ToolDiscoveryError):
-                    status, reason = "partial", leaf.reason_code
-                else:
-                    status, reason = {
-                        "configuration": ("configuration_required", "CONFIGURATION_REQUIRED"),
-                        "authentication": ("authentication_required", "AUTHENTICATION_REQUIRED"),
-                        "authorization": ("authentication_required", "AUTHENTICATION_REQUIRED"),
-                        "timeout": ("partial", "DISCOVERY_TIMED_OUT"),
-                        "runtime": ("startup_failed", "RUNTIME_START_FAILED"),
-                    }.get(diagnostic.kind, ("connection_failed", "CONNECTION_FAILED"))
-                await self.registry_client.report_discovery(managed, request["id"], request["etag"], {
-                    "status": status, "reason_code": reason, "page_count": 0,
-                    "duration_ms": min(30000, self._duration_ms(started)),
-                })
-                return
-            contribution = request.get("contribution")
-            preview_options = {}
-            if isinstance(contribution, dict) and contribution.get("state") == "preparing":
-                preview_options = {"prepare_contribution": True, "contribution_template": contribution.get("template"),
-                                   "contribution_inputs": resolved.contribution_inputs}
-            await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"], **preview_options)
-            self._queue_managed_application(managed, request["id"])
+            async with self.registry_client.discovery_scope(managed):
+                request = await self.registry_client.fetch_discovery(managed, request["id"])
+                if request.get("status") not in {"queued", "discovering"}:
+                    return
+                expires = datetime.fromisoformat(request["expires_at"])
+                if expires.tzinfo is None or expires <= datetime.now(UTC):
+                    return
+                managed.assert_current()
+                started = monotonic()
+                try:
+                    async with asyncio.timeout(30):
+                        async with self.upstream_client.session(resolved.config) as client:
+                            inventory = await self.upstream_client.discover_tools(client)
+                except Exception as exc:
+                    leaf = unwrap_error(exc)
+                    diagnostic = diagnostic_for_exception(leaf)
+                    if isinstance(leaf, ToolDiscoveryError):
+                        status, reason = "partial", leaf.reason_code
+                    else:
+                        status, reason = {
+                            "configuration": ("configuration_required", "CONFIGURATION_REQUIRED"),
+                            "authentication": ("authentication_required", "AUTHENTICATION_REQUIRED"),
+                            "authorization": ("authentication_required", "AUTHENTICATION_REQUIRED"),
+                            "timeout": ("partial", "DISCOVERY_TIMED_OUT"),
+                            "runtime": ("startup_failed", "RUNTIME_START_FAILED"),
+                        }.get(diagnostic.kind, ("connection_failed", "CONNECTION_FAILED"))
+                    await self.registry_client.report_discovery(managed, request["id"], request["etag"], {
+                        "status": status, "reason_code": reason, "page_count": 0,
+                        "duration_ms": min(30000, self._duration_ms(started)),
+                    })
+                    return
+                contribution = request.get("contribution")
+                preview_options = {}
+                if isinstance(contribution, dict) and contribution.get("state") == "preparing":
+                    preview_options = {"prepare_contribution": True, "contribution_template": contribution.get("template"),
+                                       "contribution_inputs": resolved.contribution_inputs}
+                await self.registry_client.report_inventory(managed, inventory, request["id"], request["etag"], **preview_options)
+                self._queue_managed_application(managed, request["id"])
         except Exception:
             # No untrusted tool metadata, URLs, credentials or raw errors in logs.
             logger.warning("private discovery could not be reported under current authority")

@@ -135,7 +135,7 @@ def managed_router(tmp_path: Path) -> ToolRouter:
     return ToolRouter(ProxyConfig(
         auth=AuthConfig(enabled=False, issuer="https://auth.example.test"),
         local_proxy={"enabled": True, "sync_from_lightnow": True, "telemetry_enabled": False, "tool_cache_path": str(tmp_path / "tools.json")},
-        registry_api=RegistryApiConfig(enabled=True, base_url=REGISTRY, use_cli_session=True, cli_config_path=str(session), include_secrets=True),
+        registry_api=RegistryApiConfig(enabled=True, base_url=REGISTRY, use_cli_session=True, cli_config_path=str(session), include_secrets=True, runtime_files_dir=str(tmp_path / "runtime-files")),
         profiles={"default": ProfileConfig(upstreams=["docs", "bypass"], runtime_upstreams=[RuntimeUpstreamConfig(
             name="legacy-bypass", server="public.example/bypass", version="1.0.0")])},
         upstreams={"docs": UpstreamConfig(url="https://must-not-run.example.test/mcp"), "bypass": UpstreamConfig(url="https://must-not-run.example.test/mcp")},
@@ -167,7 +167,7 @@ async def test_heartbeat_executes_exact_queued_inventory_without_business_call(t
             return httpx.Response(200, json={"servers": [entry]})
 
         def report_response(incoming):
-            assert incoming.headers["If-Match"] == request["etag"]
+            assert incoming.headers["If-Match"] == '"fixture:2"'
             body = json.loads(incoming.content)
             reports.append(body)
             assert body["context_proof"] == context["context_proof"]
@@ -181,6 +181,7 @@ async def test_heartbeat_executes_exact_queued_inventory_without_business_call(t
                 "managed_discovery_requests": [request, request],
             })
             mock.get(REGISTRY + "/integrations/profiles/default/servers").mock(side_effect=profile_response)
+            mock.get(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").respond(200, json={"data": request}, headers={"ETag": '"fixture:2"'})
             mock.put(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").mock(side_effect=report_response)
             assert await router.send_device_heartbeat()
             assert len(router._discovery_tasks) == 1
@@ -265,6 +266,7 @@ async def test_queued_discovery_reports_failure_without_private_error_or_partial
             "managed": context, "client_config": {"transport": "http", "url": "https://fixture.example.test/mcp"}}
     with respx.mock(assert_all_called=True) as mock:
         mock.get(REGISTRY + "/integrations/profiles/default/servers").respond(200, json={"servers": [item]})
+        mock.get(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").respond(200, json={"data": request}, headers={"ETag": request["etag"]})
         report = mock.put(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").respond(200, json={"data": {"status": status}})
         await router._run_discovery(request)
         body = json.loads(report.calls.last.request.content)

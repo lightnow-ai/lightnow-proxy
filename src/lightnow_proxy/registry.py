@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -10,7 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 from time import monotonic, time
-from typing import Awaitable, Callable, Literal
+from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import UUID
 from typing import Any
 from urllib.parse import quote
@@ -470,26 +471,77 @@ class RegistryApiClient:
         client_config = item.get("client_config")
         return not (isinstance(client_config, dict) and client_config.get("enabled") is False)
 
+    @asynccontextmanager
+    async def discovery_scope(self, managed: ManagedRuntime) -> AsyncIterator[None]:
+        """Coordinate metadata writers, never business calls or cached grants."""
+        managed.assert_current()
+        root = Path(self.config.resolved_runtime_files_dir())
+        directory = root / ".discovery-locks"
+        for item in (root, directory):
+            item.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if item.is_symlink() or not item.is_dir():
+                raise RegistryApiError("INVALID_DISCOVERY_LOCK_DIRECTORY")
+            item.chmod(0o700)
+        identity = json.dumps([str(self.config.base_url).rstrip("/"), str(managed.actor_id), str(managed.owner_id),
+                               str(managed.runtime_client_id), str(managed.assignment_id)])
+        key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        # Each acquisition needs its own instance: FileLock is reentrant. Keep
+        # the stable lock file so another process cannot acquire a new inode.
+        lock = FileLock(str(directory / f"{key}.lock"), thread_local=False,
+                        timeout=max(0, min(self.config.timeout_seconds, managed.deadline - monotonic())))
+        try:
+            await _acquire_file_lock(lock)
+        except FileLockTimeout as exc:
+            managed.assert_current()
+            raise RegistryApiError("MANAGED_DISCOVERY_BUSY") from exc
+        try:
+            managed.assert_current()
+            yield
+        finally:
+            await _release_file_lock(lock)
+
+    async def fetch_discovery(self, managed: ManagedRuntime, attempt_id: str) -> dict[str, Any]:
+        managed.assert_current()
+        headers = await self._authorization_headers()
+        url = self._api_url(f"/integrations/connections/{managed.connection_id}/tool-discoveries/{UUID(attempt_id)}")
+        async with self._http_client() as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        managed.assert_current()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict) or data.get("id") != attempt_id or not response.headers.get("ETag"):
+            raise RegistryApiError("INVALID_DISCOVERY_RESPONSE")
+        for field in ("connection_id", "connection_revision", "profile_id", "profile_revision", "policy_revision", "profile",
+                      "assignment_id", "assignment_revision", "runtime_client_id", "credential_binding_id", "credential_revision"):
+            expected = getattr(managed, field)
+            if isinstance(expected, UUID):
+                expected = str(expected)
+            if field not in data or type(data[field]) is not type(expected) or data[field] != expected:
+                raise RegistryApiError("MANAGED_CONTEXT_MISMATCH")
+        return {**data, "etag": response.headers["ETag"]}
+
     async def authorize_inventory(
         self, managed: ManagedRuntime, inventory: ToolInventory, original_tool_name: str | None = None,
         *, observed: Callable[[str], None] | None = None, reported: Callable[[str], None] | None = None,
     ) -> set[str]:
-        managed.assert_current()
-        headers = await self._authorization_headers()
-        base = self._api_url(f"/integrations/connections/{managed.connection_id}/tool-discoveries")
-        async with self._http_client() as client:
-            response = await client.post(base, headers=headers, json={
-                "profile": managed.profile, "assignment_id": str(managed.assignment_id),
-                "runtime_client_id": str(managed.runtime_client_id),
-            })
-            response.raise_for_status()
-            created = response.json()
-            try:
-                attempt_id = str(UUID(created["data"]["id"]))
-                etag = response.headers["ETag"]
-            except (KeyError, TypeError, ValueError):
-                raise RegistryApiError("INVALID_DISCOVERY_RESPONSE") from None
-        return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name, observed=observed, reported=reported)
+        async with self.discovery_scope(managed):
+            managed.assert_current()
+            headers = await self._authorization_headers()
+            base = self._api_url(f"/integrations/connections/{managed.connection_id}/tool-discoveries")
+            async with self._http_client() as client:
+                response = await client.post(base, headers=headers, json={
+                    "profile": managed.profile, "assignment_id": str(managed.assignment_id),
+                    "runtime_client_id": str(managed.runtime_client_id),
+                })
+                response.raise_for_status()
+                created = response.json()
+                try:
+                    attempt_id = str(UUID(created["data"]["id"]))
+                    etag = response.headers["ETag"]
+                except (KeyError, TypeError, ValueError):
+                    raise RegistryApiError("INVALID_DISCOVERY_RESPONSE") from None
+            return await self.report_inventory(managed, inventory, attempt_id, etag, original_tool_name, observed=observed, reported=reported)
 
     async def report_discovery(
         self, managed: ManagedRuntime, attempt_id: str, etag: str, report: dict[str, Any],
