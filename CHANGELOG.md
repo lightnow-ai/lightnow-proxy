@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.3](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.2...v1.12.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **proxy:** coordinate concurrent managed discovery reports ([#98](https://github.com/lightnow-ai/lightnow-proxy/issues/98)) ([441d9a1](https://github.com/lightnow-ai/lightnow-proxy/commit/441d9a12e949323a2dc6e87e1cac8bdba729738f))
+* **proxy:** deliver managed call evidence when short sessions end ([66ee4f4](https://github.com/lightnow-ai/lightnow-proxy/commit/66ee4f43948bfea451ec709e57840c15fe82126f))
+* wake managed evidence sender when events arrive ([c5b4226](https://github.com/lightnow-ai/lightnow-proxy/commit/c5b4226f18e2e481bf1b3cdcdf2158df92cdfbaa))
+
 ## [1.12.2](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.1...v1.12.2) (2026-11-12)
 
 

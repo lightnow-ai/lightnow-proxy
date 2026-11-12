@@ -1,6 +1,6 @@
 [project]
 name = "lightnow-proxy"
-version = "1.12.2"
+version = "1.12.3"
 description = "LightNow Local Proxy for centrally managed MCP client configuration"
 readme = "README.md"
 requires-python = ">=3.11"
