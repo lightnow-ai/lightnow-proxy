@@ -523,11 +523,12 @@ async def test_managed_names_stay_bound_to_assignment_through_alias_collision_re
                 assert not (await router.call_tool("default", first_wire, {"value": "renamed"})).is_error
                 assert first_calls() == ["_read", "_read"]
                 assert second_calls() == []
-                # A replacement between metadata and context delivery is also rejected.
+                # A replacement found through a lookup hint cannot inherit the
+                # old UUID; full fresh metadata confirms its removal.
                 pending_replacement = str(uuid4())
                 with pytest.raises(Exception) as replaced:
                     await router.call_tool("default", first_wire, {"value": "rebound"})
-                assert str(unwrap_error(replaced.value)) == "MANAGED_CONTEXT_MISMATCH"
+                assert str(unwrap_error(replaced.value)) == "MANAGED_ASSIGNMENT_UNAVAILABLE"
                 required = False
                 # Even an exact local override cannot inherit the detached name.
                 router.config.upstreams[TOOL_PREFIX] = UpstreamConfig(**{**second_config,

@@ -435,6 +435,36 @@ class RegistryApiClient:
 
         raise RegistryApiError(f"Registry profile server {alias!r} is not available")
 
+    async def fetch_profile_call_target(
+        self, profile_name: str, alias: str, namespace: str, principal: Principal | None,
+    ) -> ResolvedRuntimeUpstream | None:
+        """Resolve a lookup hint against current authority, never cached grants."""
+        started = monotonic()
+        payload = await self._fetch_profile_servers(
+            profile_name, include_secrets=self.config.include_secrets, alias=alias,
+        )
+        servers = payload.get("servers")
+        if not isinstance(servers, list):
+            raise RegistryApiError("Registry profile servers response must include a servers array")
+        required = self._admission_required(payload)
+        # Older servers that ignore the alias filter must use the complete
+        # routing validation instead of silently narrowing an ambiguous payload.
+        if len(servers) != 1:
+            return None
+        matches = [item for item in servers if isinstance(item, dict)
+                   and item.get("alias") == alias and self._profile_server_enabled(item)]
+        if len(matches) != 1:
+            return None
+        item = matches[0]
+        managed = "connection_id" in item
+        actual_namespace = managed_tool_namespace(item.get("assignment_id")) if managed else alias
+        if actual_namespace != namespace or (required and not managed):
+            return None
+        resolved = await self._profile_server_to_upstream(item, profile_name, principal, started=started)
+        if managed and (resolved.managed is None or resolved.managed.tool_namespace != namespace):
+            raise RegistryApiError("MANAGED_CONTEXT_MISMATCH")
+        return resolved
+
     @staticmethod
     def _profile_server_enabled(item: dict[str, Any]) -> bool:
         client_config = item.get("client_config")
