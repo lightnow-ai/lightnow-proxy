@@ -171,6 +171,7 @@ async def test_native_discovery_transfers_only_opted_in_preview_and_preserves_pr
                     "contribution_inputs": None if preparation == "missing" else bound}}
         with respx.mock(assert_all_called=True) as mock:
             mock.get(REGISTRY + "/integrations/profiles/default/servers").respond(200, json={"servers": [item]})
+            mock.get(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").respond(200, json={"data": request}, headers={"ETag": request["etag"]})
             report = mock.put(REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries/{DISCOVERY}").respond(200,
                 json={"authorization": {"schema_version": 1, "expires_at": context["expires_at"], "allowed_tools": []}})
             async with AsyncExitStack() as stack:
