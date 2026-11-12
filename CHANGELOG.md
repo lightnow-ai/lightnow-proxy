@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.12.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.0...v1.12.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **release:** wait for PyPI before publishing Registry metadata ([#91](https://github.com/lightnow-ai/lightnow-proxy/issues/91)) ([100d2c3](https://github.com/lightnow-ai/lightnow-proxy/commit/100d2c365b25d7ef4cefe7c9109c5f2fc334adfa))
+
+
+### Performance Improvements
+
+* **proxy:** decouple telemetry and streamline fresh profile resolution ([#88](https://github.com/lightnow-ai/lightnow-proxy/issues/88)) ([132dee0](https://github.com/lightnow-ai/lightnow-proxy/commit/132dee051da6eb6b249a23692eec2dd11c55fc4a))
+
+
+### Documentation
+
+* rewrite public proxy setup and architecture guides ([#90](https://github.com/lightnow-ai/lightnow-proxy/issues/90)) ([dde34b0](https://github.com/lightnow-ai/lightnow-proxy/commit/dde34b09362c809ca7c3c8fe1e6230ed15bcd660))
+
 ## [1.12.0](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.11.0...v1.12.0) (2026-11-09)
 
 
