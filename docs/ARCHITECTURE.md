@@ -1,298 +1,98 @@
-# LightNow Local Proxy Architecture
+# How LightNow Proxy works
 
-## Goal
+LightNow Proxy connects an AI client to the MCP servers in a selected LightNow
+Runtime profile. It runs on the user's computer, where it can start local
+servers and reach services available on that machine's network.
 
-The LightNow Local Proxy is a local-only MCP proxy. Users configure one
-LightNow entry in their MCP client. The proxy owns the selected MCP server
-configuration and routes tool calls to the configured upstreams.
+For installation and client configuration, start with the [README](../README.md).
 
-This lets LightNow move from "every client contains every MCP server config" to
-"the client contains one local LightNow endpoint".
-
-## Request Flow
+## Components and request flow
 
 ```text
-MCP client
-  -> http://127.0.0.1:{port}/mcp
-  -> LightNow Local Proxy
-  -> active profile
-  -> configured upstream MCP server
-  -> prefixed tool/resource result
+AI client
+    │ MCP requests and responses
+    ▼
+LightNow Proxy on your computer
+    ├── LightNow: profile, access and connection configuration
+    ├── Local MCP servers: started over stdio
+    └── Remote MCP servers: reached over Streamable HTTP
 ```
 
-The Local Proxy exposes upstream tools as `{upstream}__{tool}`. Prefixing avoids
-tool name collisions and gives later monitoring a stable upstream identity.
-Resources are exposed as `lightnow://{upstream}/{encoded_original_uri}` so a
-client can read them through the proxy without leaking resource contents into
-LightNow analytics.
+The LightNow CLI signs the user in and writes the AI client's connection entry.
+With the usual generated configuration, the client starts the proxy as a local
+stdio process. A separate background service or public HTTP listener is not
+needed for that setup.
 
-## Protocol Compatibility
+The proxy loads the selected profile, resolves the requested server connection
+and forwards the MCP operation. Tool results and resource contents return to the
+AI client through the proxy. Each server still applies its own authentication
+and permissions.
 
-The proxy prefers MCP `2026-07-28` in both directions. Modern Streamable HTTP
-requests are stateless and use `server/discover`, the required per-request
-`_meta` protocol envelope, and the `MCP-Protocol-Version`, `Mcp-Method`,
-`Mcp-Name`, and schema-derived `Mcp-Param-*` headers. Aggregated list responses
-are deterministic and carry `ttlMs: 0`, `cacheScope: private`, and
-`resultType: complete`, so clients do not reuse a profile-dependent result
-beyond the request.
+## Profiles and access
 
-Connections automatically fall back to the `2025-11-25` initialization and
-session model when the peer does not implement `server/discover`. The proxy
-therefore remains usable during a mixed-version rollout without presenting
-legacy initialization or session state to a modern peer.
+A profile selects the server connections available to a client. Personal and
+organization connections use the account and scope selected during CLI setup.
+Several named connections can coexist in one AI client.
 
-Only tools and resources are proxied and advertised. The proxy does not claim
-roots, sampling, logging, tasks, or multi-round tool-result capabilities; an
-upstream must not initiate those flows through this boundary until an explicit
-capability-bridging design is implemented.
+For managed connections, current organization access and the assignment's tool
+selection determine which tools can be used. A tool appearing in an earlier
+client menu does not preserve permission after access is withdrawn. The client
+may need a refresh or restart to update its displayed tool list.
 
-## Local Proxy Mode
+The proxy's tools come from the configured servers. It gives them distinct
+names so that servers with the same tool name can be used together. Clients
+should use the names returned by MCP discovery.
 
-When `local_proxy.enabled` is `true`, the app exposes only the configured local
-MCP endpoint, for example `/mcp`. The legacy profile endpoint shape
-`/profiles/{profile}/mcp` is not mounted in this mode.
+Tools and resources are supported. Other MCP capabilities depend on explicit
+proxy support; connecting a server does not automatically make all of its
+capabilities available through the proxy.
 
-```yaml
-local_proxy:
-  enabled: true
-  profile: default
-  path: /mcp
-  client_name: codex
-  runner_name: lightnow-local-proxy
-  client_transport: stdio
-```
+## Credentials and local configuration
 
-The selected profile determines which upstreams are visible:
+The generated client entry starts the proxy with a connection-specific YAML
+file. Server credentials are resolved when needed rather than copied into that
+client entry. The proxy configuration refers to the local CLI session and stays
+bound to the account that created the connection.
 
-```yaml
-profiles:
-  default:
-    upstreams:
-      - echo
-      - math
-```
+Local stdio servers run with the operating-system permissions of the proxy.
+Their executables and runtimes must be installed on that computer. Remote
+servers must be reachable from it.
 
-The local MCP endpoint is unauthenticated because desktop MCP clients start it
-as a local process. It therefore validates MCP HTTP `Host` and `Origin` headers
-and allows only loopback browser origins. A non-loopback `server.public_url` is
-ignored for Local Proxy browser-origin allowlisting; Local Proxy mode is not a
-remote hosted endpoint.
+A server can also use non-secret configuration files managed in its profile.
+Credentials belong in runtime secrets or an authorized external secret store.
+See [Manage runtime secrets and config](https://docs.lightnow.ai/how-to/manage-runtime-secrets-and-config)
+for setup, including HashiCorp Vault and private-network resolution.
 
-## Upstream Transports
+## What LightNow records
 
-The Local Proxy can route to both currently relevant MCP transport classes:
+| Data | Where it goes |
+| --- | --- |
+| Tool requests and responses | Between the AI client, local proxy and selected MCP server |
+| Profile and connection configuration | From LightNow to the authorized proxy |
+| Optional runtime activity | To LightNow for request diagnostics and connection health |
+| Required managed-call audit records | To LightNow for managed connection activity |
 
-- `stdio`: launch a local MCP server process with fixed command, args, cwd, and
-  environment.
-- `streamable-http`: call a reachable MCP server over HTTP.
+Optional activity can include tool names, outcomes, timings and client context.
+Argument capture is configurable and enabled by default; credential-like fields
+are redacted. Managed connection events omit argument values. Runtime events exclude
+tool results, resource contents and resolved credentials.
 
-Both transports can sit behind the same local client-facing `/mcp` endpoint. In
-practice, `stdio` upstreams are the strongest reason for a local proxy because a
-hosted service cannot run customer-local binaries or reach customer-local files
-without a separate enterprise deployment model.
+Required managed-call audit records describe execution metadata, including
+policy refusals and reported outcomes. They remain separate from optional
+activity capture. An unknown outcome is not evidence that an action succeeded
+or failed at the upstream service.
 
-## Configuration Source
+Optional activity delivery is best effort. Use the server's own records when
+you need to establish the final business outcome of an operation.
 
-Static YAML remains available for fixtures and local protocol tests. In normal
-user flows, the CLI writes a per-client Local Proxy config and the proxy fetches
-the active LightNow MCP configuration at runtime.
+## Checking a deployment
 
-1. User enables Local Proxy Mode in LightNow.
-2. The local installer or CLI writes one client MCP config entry.
-3. The CLI writes a per-client Local Proxy config with the selected profile,
-   client identity, telemetry flag and observe/enforce policy posture.
-4. The Local Proxy fetches the active LightNow MCP config.
-5. LightNow UI controls which upstreams are available.
+`lightnow config-status` checks the AI client's LightNow configuration.
+`lightnow-proxy --config <generated-proxy.yaml> --health` checks profile
+resolution and upstream tool discovery. Neither runs a business tool to prove
+that a particular action will succeed.
 
-## Private Vault operation execution
-
-`SecretOperationExecutor` executes a single Registry-issued KV2 claim. The
-strict claim binds the operation, provider, opaque target, CAS version and
-expiry. Writes require an explicit `runtime_secrets.providers` mapping; keyring
-authentication additionally requires a locally configured HTTPS address. Read
-resolution keeps its existing behavior. Both paths share TLS/bootstrap handling
-and bound decompressed Vault responses to 64 KiB before buffering.
-
-A write uses CAS and records the operation marker, then reads the exact new KV2
-version and confirms its marker and bytes before returning a SHA256 attestation.
-Readback claims perform no POST, including when the version is missing. ACL/CAS
-refusals are terminal reports; timeouts, redirects and unconfirmed versions
-remain uncertain. Values exist only in the claim/request memory, not in logs or
-the result. Registry retains final authorization and reference activation.
-
-This executor is the IO part of private workers. Durable claim acquisition,
-polling, connector lifecycle and OAuth integration are separate mandatory parts;
-the executor alone does not enable private Vault management through the UI.
-
-## Runtime Telemetry
-
-Runtime telemetry emits events for:
-
-- runner lifecycle start/stop
-- `tools/list`
-- `tools/call`
-- `resources/list`
-- `resources/read`
-- `resources/templates/list`
-
-When a CLI-generated Local Proxy configuration includes stable device and
-client-instance UUIDs, the proxy also sends one presence heartbeat at startup
-and every 120 seconds (15 seconds for synchronized managed runtimes). The Registry API computes active presence with a
-300-second threshold. Heartbeat failures are logged and exposed through local
-status, but never block MCP traffic; the next regular heartbeat is the only
-retry. Disabling optional telemetry disables legacy activity and presence-only
-heartbeats. Synchronized managed runtimes retain their heartbeat and required
-call-evidence uploader independently of that preference.
-
-Events identify both the MCP end-client (`mcp_client_name`, for example
-`codex`) and the local process (`runner_name`, for example
-`lightnow-local-proxy`). This distinction matters because the runner is the
-execution boundary, but the customer needs to understand which MCP client is
-using a profile.
-
-Events may include method, status, duration, upstream transport, server alias,
-tool name, resource URI, response item count, request/response byte counts,
-MIME/content type and error type. Tool-call events include top-level argument
-key names and, by default, their argument values. Users can opt out of argument
-value capture in the LightNow Local Proxy settings without disabling runtime
-events or device presence. MCP request metadata keys and normalized client
-context may also be included. Values under credential-like keys such as tokens,
-passwords, secrets and authorization fields are replaced with `[REDACTED]`
-before an event leaves the proxy.
-Client-specific metadata is translated through adapters before it reaches
-Registry API. Codex `x-codex-turn-metadata` maps to generic session, thread,
-turn, model, reasoning and sandbox fields while still filling legacy `codex_*`
-fields for compatibility. Antigravity `antigravity.google/conversation_id` maps
-to the generic thread/conversation field. Local paths such as Antigravity
-artifact directories are observed only as metadata keys and must not be stored
-as values. Runtime telemetry must not include tool results, resource contents,
-workspace paths, git remotes, commit hashes, resolved LightNow secrets or
-unredacted authorization values. Authorization fields may be present only with
-their values replaced by `[REDACTED]`.
-
-## Status And Active Checks
-
-`/status` is the canonical non-secret local status endpoint. By default it
-returns static runtime posture: local proxy mode, selected profile, runner
-identity, client identity, telemetry flag, observe/enforce policy posture,
-unmanaged-server policy, Registry API usage flags, profile names and static
-upstream names. It is meant for local installers and support tooling that need
-to inspect the configured posture without touching upstream MCP servers.
-
-`/status?check=upstreams` and `lightnow-proxy --health` perform an active
-upstream check. They resolve the selected profile and run tool discovery against
-each upstream MCP server. The report classifies the proxy as:
-
-- `healthy`: the selected profile resolves and all upstreams answer.
-- `degraded`: the proxy can run, but at least one upstream failed or the active
-  profile has no upstreams.
-- `failed`: the selected profile cannot be resolved.
-
-The active health report includes profile name, upstream alias, transport,
-server name, duration, tool count and redacted error type/message. It must not
-include secrets, authorization headers, tool arguments, tool results or resource
-contents.
-
-The CLI exits with code `0` for `healthy`, `2` for `degraded`, and `1` for
-`failed` so installers and future UI handoff code can distinguish "proxy is
-down" from "one configured server is unhealthy".
-
-## Legacy Profile Proxy
-
-The repository previously exposed one remote MCP endpoint per profile with
-Keycloak bearer-token checks. That shape remains available only when
-`local_proxy.enabled` is false.
-
-Profile endpoints also validate MCP HTTP `Host` and `Origin` headers. Unlike
-Local Proxy mode, they may allow the configured `server.public_url` host because
-they require bearer-token authentication before routing MCP requests.
-
-`profiles.*.required_groups` match Keycloak group paths after trimming leading
-and trailing slashes. Top-level paths such as `/lightnow-proxy-admins` therefore
-match `lightnow-proxy-admins`, but nested groups are not reduced to their final
-path segment. For example, `/team-a/admin` does not grant access to a profile
-requiring `/team-b/admin` or plain `admin`.
-
-## Required managed call evidence
-
-For an exact business-tool discovery, send the original report-only receipt to
-the existing discovery resource. A returned name-bound receipt replaces it only
-for subsequent call phases, preserving the original lifetime and context.
-Previously queued facts retain their IDs and content. The private call journal
-persists the bound receipt before dispatch, including for crash recovery, so
-late named evidence can be verified after the runtime observation is removed.
-This receipt cannot authorize execution or renew the original authority.
-
-After complete discovery and validation of the current tool authorization, the
-runtime queues the exact observation and its original short-lived context proof
-on the existing device heartbeat. This includes an applied empty/denied policy.
-At most 20 acknowledgements are sent per heartbeat; the private in-memory queue
-is bounded to 2,000 assignments. Expired authority is discarded with an explicit
-local status, never renewed. Missing or malformed server acknowledgement retains
-the original pending item; a response cannot remove a newer concurrent item.
-Status exposes only pending count and a closed error code. Acknowledgement
-confirms this runtime's validated policy, not refreshed menus in every AI client,
-business-call success, or a new execution grant. Deploy the supporting Registry
-API before releasing this client capability.
-
-Managed calls use Registry's existing `POST /integrations/runtime-events` v2
-contract (`registry-api/specs/managed-runtime-event.schema.json`). This is
-independent of optional activity capture and never includes arguments, results,
-credentials, transport URLs or raw errors. The encrypted reporting receipt is
-private local queue material; it is not an execution grant or an upstream
-attestation. Tool names require a completed private discovery observation.
-
-The proxy uses Python's native SQLite journal, with FULL synchronization and
-short transactions, under a private directory beside the CLI session. A managed
-call reserves bounded queue capacity and commits `attempted` before upstream
-startup, then `dispatch_started` after fresh authorization and immediately before
-the single business handoff. A received MCP response permits `dispatched` and
-`succeeded`/`upstream_failed`; transport loss after handoff is `outcome_unknown`.
-Pre-handoff infrastructure failures are `runtime_failed`; a tool-policy refusal
-is `denied`. No tool call is retried by this journal.
-
-Every call holds the existing native OS file lock for its UUID. Other proxy
-processes may share the journal, but cannot recover a live call. After an owner
-process exits, recovery records `runtime_failed` for pre-handoff calls or
-`outcome_unknown` after a committed handoff intent. It never invents success.
-Pending events retain their UUID, original receipt and actor/environment binding
-through every upload retry. Upload uses the same CLI subject/issuer and Registry
-API, without the currently selected tenant header; Registry derives the owner
-from the original receipt. Account changes cannot relabel queued events.
-
-A separate bounded uploader runs for synced local proxies even when optional
-telemetry or device presence is disabled. Delivery retries only immutable event
-uploads. Expired/rejected reports remain visible as unresolved queue items; they
-are not silently deleted. Queue corruption, missing receipts or exhausted local
-capacity blocks managed dispatch explicitly. The status endpoint exposes only
-counts and closed failure codes. The queue is limited to 2,000 unfinished calls,
-with at most four facts per call, and completed acknowledged calls are removed.
-
-A failed current-context lookup must not erase a managed attempt after a previous
-successful discovery. The private journal may retain only the separate report
-receipt, its delivery deadline and original actor/Registry/profile/assignment
-binding. Store this before external-secret resolution. On lookup failure, record
-an attempted/runtime-failed pair against that original reporting context, with no
-unverified tool name, while preserving the original execution error. This cache
-never supplies a runtime configuration, business lease or use grant. Changed
-accounts/issuers/Registry endpoints cannot borrow another receipt. Without an
-unexpired receipt, increment a durable local unattributed-attempt count instead
-of inventing an owner or reporting a successful call. Required evidence status
-exposes that gap. Receipt storage is separately bounded to 2,000 entries and
-expired receipts can be removed; pending event facts remain subject to their
-existing explicit-resolution policy.
-
-Before the first control-plane lookup, reserve a durable unattributed attempt.
-Transfer that reservation into the attributed call journal in the same SQLite
-transaction as its `attempted` fact. A process exit during lookup therefore
-leaves a visible unattributed gap. Completed attribution consumes exactly its
-own reservation; missing receipts and failed journal commits retain the gap.
-A currently missing assignment in a successfully fetched profile is an explicit
-assignment denial, distinct from an unavailable control plane.
-
-Multiple managed clients can share one CLI session and durable journal. Receipt
-cache keys additionally bind the native installation/client-instance coordinate;
-a control-plane outage on one client cannot borrow another client's receipt.
-The atomic SQLite cache migration retains old unbound receipts separately until
-expiry and preserves every queued fact. Missing own-client attribution remains
-an explicit gap. Neither cache lookup nor migration creates execution authority.
+In LightNow, **Control Plane → Requests** shows captured runtime activity.
+A managed connection's **Activity** view shows its managed-call history.
+See [Inspect runtime events](https://docs.lightnow.ai/how-to/inspect-runtime-events)
+for filtering and interpreting those records.
