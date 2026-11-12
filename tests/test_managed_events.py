@@ -314,6 +314,61 @@ async def test_stdio_eof_flushes_required_facts_after_joining_the_background_upl
 
 
 @pytest.mark.asyncio
+async def test_new_managed_call_wakes_idle_uploader_without_waiting_for_poll_or_shutdown(tmp_path, monkeypatch):
+    router = managed_router(tmp_path)
+    router.registry_client.runtime_client_id = CLIENT
+    managed = lease()
+    box = router._event_outbox()
+    first_cycle = asyncio.Event()
+    original_flush = router.flush_managed_events
+
+    async def observed_flush():
+        await original_flush()
+        first_cycle.set()
+
+    monkeypatch.setattr(router, "flush_managed_events", observed_flush)
+    dispatches = []
+
+    class Upstream:
+        async def call_tool(self, config, name, arguments, *, authorize):
+            await authorize(ToolInventory([Tool(name="read", input_schema={})], 1, 1))
+            dispatches.append(name)
+            return CallToolResult(content=[TextContent(type="text", text="read once")])
+
+    router.upstream_client = Upstream()
+    delivered = []
+
+    def endpoint(request):
+        event = json.loads(request.content)
+        delivered.append(event)
+        return httpx.Response(201, json={"event": event})
+
+    base = REGISTRY + f"/integrations/connections/{CONNECTION}/tool-discoveries"
+    with respx.mock(assert_all_called=True) as api:
+        api.post(base).respond(201, json={"data": {"id": DISCOVERY}}, headers={"ETag": '"1"'})
+        api.put(base + "/" + DISCOVERY).respond(200, json={"authorization": {
+            "schema_version": 1, "expires_at": managed.expires_at, "allowed_tools": ["read"],
+            "requested_tool": {"name": "read", "allowed": True, "reason_code": None},
+            "reporting_proof": "bound-original-lifetime-receipt",
+        }})
+        api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=endpoint)
+        uploader = asyncio.create_task(router.run_managed_event_loop())
+        try:
+            await asyncio.wait_for(first_cycle.wait(), 1)
+            upstream = ProfileUpstream(config=UpstreamConfig(url="https://private-upstream.test/mcp"), managed=managed)
+            result = await router._call_managed_tool(upstream, "read", {})
+            assert result.content[0].text == "read once"
+            async with asyncio.timeout(1):
+                while box.status()["pending"]:
+                    await asyncio.sleep(.01)
+            assert [event["phase"] for event in delivered] == ["attempted", "dispatch_started", "dispatched", "succeeded"]
+            assert dispatches == ["read"]
+        finally:
+            uploader.cancel()
+            await asyncio.gather(uploader, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure,phase", [("upstream_error", "upstream_failed"), ("transport_loss", "outcome_unknown"),
                                           ("cancelled", "outcome_unknown")])
 async def test_response_transport_loss_and_cancellation_have_distinct_immutable_outcomes(tmp_path, failure, phase):

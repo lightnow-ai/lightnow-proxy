@@ -144,6 +144,7 @@ class ToolRouter:
         self._managed_outbox: ManagedEventOutbox | None = None
         self._managed_report_error: str | None = None
         self._managed_upload_lock = asyncio.Lock()
+        self._managed_events_ready = asyncio.Event()
         self._managed_applications: dict[str, tuple[ManagedRuntime, str]] = {}
         self._managed_application_error: str | None = None
         # Lookup hints contain no configuration or authority. Every hit still
@@ -488,6 +489,7 @@ class ToolRouter:
             outbox.record(call, phase, code)
         finally:
             call.release()
+            self._managed_events_ready.set()
 
     async def _call_managed_tool(self, upstream: ProfileUpstream, tool_name: str, arguments: dict[str, Any], *, reserved: bool = False) -> CallToolResult:
         managed = upstream.managed
@@ -496,6 +498,7 @@ class ToolRouter:
         identity = await self.registry_client.managed_report_identity(refresh_tokens=False)
         outbox = self._event_outbox()
         call = outbox.begin(managed, identity, reserved=reserved)
+        self._managed_events_ready.set()
         try:
             managed.assert_current()
 
@@ -544,6 +547,7 @@ class ToolRouter:
             return result
         finally:
             call.release()
+            self._managed_events_ready.set()
 
     async def flush_managed_events(self) -> None:
         if self.registry_client is None or self._managed_upload_lock.locked():
@@ -569,8 +573,12 @@ class ToolRouter:
 
     async def run_managed_event_loop(self) -> None:
         while True:
+            self._managed_events_ready.clear()
             await self.flush_managed_events()
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(self._managed_events_ready.wait(), timeout=5)
+            except TimeoutError:
+                pass
 
     async def close_managed_events(self) -> None:
         # Call after the uploader and request producers have stopped. A short
