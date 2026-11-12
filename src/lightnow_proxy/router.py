@@ -32,6 +32,7 @@ from lightnow_proxy.secret_worker import SecretStoreWorker
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
 MANAGED_HEARTBEAT_INTERVAL_SECONDS = 15
+MANAGED_EVENT_DRAIN_SECONDS = 2.0
 TELEMETRY_MAX_EVENTS = 128
 TELEMETRY_MAX_BYTES = 1024 * 1024
 TELEMETRY_DRAIN_SECONDS = 2.0
@@ -570,6 +571,17 @@ class ToolRouter:
         while True:
             await self.flush_managed_events()
             await asyncio.sleep(5)
+
+    async def close_managed_events(self) -> None:
+        # Call after the uploader and request producers have stopped. A short
+        # session can otherwise end before its first scheduled upload.
+        if not self.managed_events_enabled():
+            return
+        try:
+            await asyncio.wait_for(self.flush_managed_events(), timeout=MANAGED_EVENT_DRAIN_SECONDS)
+        except TimeoutError:
+            # The durable outbox retains every unacknowledged fact for replay.
+            self._managed_report_error = "REPORT_DELIVERY_UNAVAILABLE"
 
     def managed_event_status(self) -> dict[str, Any]:
         return {"enabled": self.managed_events_enabled(), **(self._managed_outbox.status() if self._managed_outbox else {}),
