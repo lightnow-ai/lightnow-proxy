@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from contextvars import Context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -31,6 +32,9 @@ from lightnow_proxy.secret_worker import SecretStoreWorker
 logger = logging.getLogger(__name__)
 DEVICE_HEARTBEAT_INTERVAL_SECONDS = 120
 MANAGED_HEARTBEAT_INTERVAL_SECONDS = 15
+TELEMETRY_MAX_EVENTS = 128
+TELEMETRY_MAX_BYTES = 1024 * 1024
+TELEMETRY_DRAIN_SECONDS = 2.0
 REDACTED_ARGUMENT_VALUE = "[REDACTED]"
 SENSITIVE_ARGUMENT_KEY_PARTS = {
     "apikey",
@@ -141,6 +145,17 @@ class ToolRouter:
         self._managed_upload_lock = asyncio.Lock()
         self._managed_applications: dict[str, tuple[ManagedRuntime, str]] = {}
         self._managed_application_error: str | None = None
+        # Lookup hints contain no configuration or authority. Every hit still
+        # fetches and validates a fresh response for that exact assignment.
+        self._profile_aliases: dict[tuple[str, str], str] = {}
+        self._telemetry_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=TELEMETRY_MAX_EVENTS)
+        self._telemetry_task: asyncio.Task[None] | None = None
+        self._telemetry_bytes = 0
+        self._telemetry_inflight = False
+        self._telemetry_sent = 0
+        self._telemetry_failed = 0
+        self._telemetry_dropped = 0
+        self._telemetry_closed = False
 
     def update_client_context(
         self,
@@ -723,6 +738,27 @@ class ToolRouter:
             if self.registry_client is None:
                 raise ToolRoutingError("local proxy sync requires registry_api to be enabled")
             await self._ensure_runtime_registration()
+            namespace, _, original_name = proxied_tool_name.partition("__")
+            # Legacy aliases may themselves contain underscores. Preserve the
+            # full longest-prefix routing check for ambiguous wire names.
+            unambiguous = reserved_managed_namespace(namespace) or (
+                not original_name.startswith("_") and "__" not in original_name
+            )
+            hint = self._profile_aliases.get((profile_name, namespace)) if unambiguous else None
+            if hint is not None:
+                resolved = await self.registry_client.fetch_profile_call_target(
+                    profile_name, hint, namespace, get_current_principal(),
+                )
+                if resolved is not None:
+                    if reserved_managed_namespace(namespace) and resolved.managed is None:
+                        raise RegistryApiError("MANAGED_CONTEXT_MISMATCH")
+                    routed = self.route_tool(proxied_tool_name, {namespace: None})
+                    return RoutedTool(resolved.name, routed.original_name), ProfileUpstream(
+                        config=resolved.config, server_name=resolved.server_name, managed=resolved.managed,
+                    )
+                # Rename, removal or alias reuse: redo the original complete
+                # lookup, never use the hint or a previous configuration.
+                self._profile_aliases.pop((profile_name, namespace), None)
             payload = await self.registry_client.fetch_profile_metadata(profile_name)
             servers = payload.get("servers")
             if not isinstance(servers, list):
@@ -764,6 +800,9 @@ class ToolRouter:
                 resolved = await self.registry_client.fetch_profile_upstream(profile_name, names[routed.upstream_name], get_current_principal())
                 if routed.upstream_name in managed_names and (resolved.managed is None or resolved.managed.tool_namespace != routed.upstream_name):
                     raise ToolRoutingError("MANAGED_CONTEXT_MISMATCH")
+                if len(self._profile_aliases) >= 2000:
+                    self._profile_aliases.clear()
+                self._profile_aliases[(profile_name, routed.upstream_name)] = names[routed.upstream_name]
                 return RoutedTool(resolved.name, routed.original_name), ProfileUpstream(config=resolved.config, server_name=resolved.server_name, managed=resolved.managed)
             if required:
                 return routed, None
@@ -797,6 +836,11 @@ class ToolRouter:
                 raise ToolRoutingError("local proxy sync requires registry_api to be enabled")
             await self._ensure_runtime_registration()
             resolved_profile = await self.registry_client.fetch_profile(profile_name, get_current_principal())
+            for item in resolved_profile.upstreams:
+                namespace = item.managed.tool_namespace if item.managed is not None else item.name
+                if len(self._profile_aliases) >= 2000:
+                    self._profile_aliases.clear()
+                self._profile_aliases[(profile_name, namespace)] = item.name
             canonical = {item.name: ProfileUpstream(config=item.config, server_name=item.server_name, managed=item.managed)
                          for item in resolved_profile.upstreams}
             if resolved_profile.admission_required:
@@ -882,9 +926,64 @@ class ToolRouter:
             if value is not None
         }
         try:
-            await self.registry_client.post_runtime_event(event)
-        except Exception as exc:  # pragma: no cover - defensive logging only
-            logger.warning("failed to post LightNow MCP runtime event: %s", exc)
+            payload = json.dumps(event, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            self._telemetry_dropped += 1
+            logger.warning("optional runtime telemetry dropped; event is not JSON serializable")
+            return
+        if (self._telemetry_closed or self._telemetry_queue.full()
+                or self._telemetry_bytes + len(payload) > TELEMETRY_MAX_BYTES):
+            self._telemetry_dropped += 1
+            logger.warning("optional runtime telemetry dropped; buffer unavailable")
+            return
+        self._telemetry_queue.put_nowait(payload)
+        self._telemetry_bytes += len(payload)
+        if self._telemetry_task is None or self._telemetry_task.done():
+            self._telemetry_task = asyncio.create_task(
+                self._send_runtime_events(), name="lightnow-telemetry", context=Context(),
+            )
+
+    async def _send_runtime_events(self) -> None:
+        while not self._telemetry_queue.empty():
+            payload = self._telemetry_queue.get_nowait()
+            self._telemetry_inflight = True
+            try:
+                await self.registry_client.post_runtime_event(json.loads(payload))
+                self._telemetry_sent += 1
+            except asyncio.CancelledError:
+                self._telemetry_dropped += 1
+                raise
+            except Exception as exc:
+                self._telemetry_failed += 1
+                # Exception text may contain private URLs, headers or values.
+                logger.warning("optional runtime telemetry delivery failed: %s", type(exc).__name__)
+            finally:
+                self._telemetry_inflight = False
+                self._telemetry_bytes -= len(payload)
+                self._telemetry_queue.task_done()
+
+    async def flush_runtime_events(self) -> None:
+        await self._telemetry_queue.join()
+
+    async def close_runtime_events(self) -> None:
+        self._telemetry_closed = True
+        try:
+            await asyncio.wait_for(self.flush_runtime_events(), timeout=TELEMETRY_DRAIN_SECONDS)
+        except TimeoutError:
+            if self._telemetry_task is not None:
+                self._telemetry_task.cancel()
+                await asyncio.gather(self._telemetry_task, return_exceptions=True)
+            while not self._telemetry_queue.empty():
+                payload = self._telemetry_queue.get_nowait()
+                self._telemetry_bytes -= len(payload)
+                self._telemetry_dropped += 1
+                self._telemetry_queue.task_done()
+            logger.warning("optional runtime telemetry shutdown deadline exceeded")
+
+    def runtime_telemetry_status(self) -> dict[str, Any]:
+        return {"pending": self._telemetry_queue.qsize() + int(self._telemetry_inflight), "pending_bytes": self._telemetry_bytes,
+                "sent": self._telemetry_sent, "failed": self._telemetry_failed,
+                "dropped": self._telemetry_dropped}
 
     def device_heartbeat_enabled(self) -> bool:
         """Return whether this observed Local Proxy has enough data to report presence."""

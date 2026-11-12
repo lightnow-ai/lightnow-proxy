@@ -452,3 +452,28 @@ Run a local health check against the example config:
 ```sh
 uv run lightnow-proxy --config config.example.yaml --health
 ```
+
+## Runtime telemetry and current profile resolution
+
+Optional runtime telemetry uses one background sender with at most 128 queued
+messages plus one in-flight message and a 1 MiB total payload budget. It does not
+hold MCP tool responses while the Registry receives the event. `/status` exposes
+pending, sent, failed and dropped counts under `local_proxy.telemetry_delivery`.
+Delivery errors and buffer loss use content-free warnings. Normal HTTP/stdio and
+one-shot command shutdown drains for at most two seconds before cancelling the
+sender and accounting for abandoned events. Optional telemetry is best effort;
+SIGKILL or forced termination can lose it. Mandatory managed audit facts retain
+the existing durable local outbox, pre-dispatch commit and asynchronous upload.
+
+After discovery or a successful lookup, the router remembers only the selected
+profile/namespace-to-alias lookup hint. Each tool call still fetches a fresh,
+filtered Registry response with current profile access, organization admission,
+configuration and managed assignment identity. It does not cache permissions,
+credentials, contexts or leases. Changed/missing hints use the original complete
+lookup; a renamed or replaced alias cannot transfer an assignment's UUID tool
+identity. The existing upstream inventory/authorization gate remains before the
+single actual managed business dispatch. Ambiguous legacy wire names retain the
+complete longest-prefix routing check. No Registry API change is required.
+
+Local regression checks: `uv run --extra dev pytest` and `uv run --extra dev ruff check .`.
+Transport latency should be compared separately from hosted model inference.

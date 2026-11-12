@@ -160,6 +160,7 @@ async def test_status_endpoint_emits_proxy_health_event_for_active_checks() -> N
 
     assert response.status_code == 200
     assert response.json()["status"] == "degraded"
+    await router.flush_runtime_events()
     assert len(registry.events) == 1
     event = registry.events[0]
     assert event["event_type"] == "proxy_health"
@@ -370,6 +371,7 @@ async def test_proxy_health_event_summarizes_active_upstream_report() -> None:
     report = await build_health_report(config, router)
     await router.emit_health_event(report)
 
+    await router.flush_runtime_events()
     assert len(registry.events) == 1
     event = registry.events[0]
     assert event["event_type"] == "proxy_health"
@@ -453,6 +455,7 @@ async def test_missing_docker_secret_becomes_actionable_health_telemetry(monkeyp
     assert failure["remediation"] == (
         "Configure GITHUB_PERSONAL_ACCESS_TOKEN as a managed or external secret in the Runtime Profile."
     )
+    await router.flush_runtime_events()
     assert registry.events[0]["proxy_health_failures"][0]["diagnostic_code"] == "DOCKER_ENV_MISSING"
     assert "managed or external secret" in registry.events[0]["proxy_health_failures"][0]["remediation"]
 
@@ -473,6 +476,7 @@ async def test_proxy_health_event_reports_redacted_upstream_failures() -> None:
     report = await build_health_report(config, router)
     await router.emit_health_event(report)
 
+    await router.flush_runtime_events()
     event = registry.events[0]
     assert event["proxy_health_status"] == "degraded"
     assert event["proxy_failed_upstreams"] == 1
@@ -771,6 +775,7 @@ async def test_modern_requests_keep_client_identity_isolated_per_request() -> No
     async with app.router.lifespan_context(app):
         await asyncio.gather(call_as("codex-a"), call_as("codex-b"))
 
+    await router.flush_runtime_events()
     call_events = [event for event in registry.events if event["event_type"] == "call_tool"]
     assert {event["mcp_client_name"] for event in call_events} == {"codex-a", "codex-b"}
     assert {event["mcp_client_version"] for event in call_events} == {"1.0.0"}

@@ -8,6 +8,8 @@ import logging
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
+import anyio
+
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -297,6 +299,7 @@ async def status(_request: Request, config: ProxyConfig, router: ToolRouter) -> 
                 "client_version": config.local_proxy.client_version,
                 "client_transport": config.local_proxy.client_transport,
                 "telemetry_enabled": config.local_proxy.telemetry_enabled,
+                "telemetry_delivery": router.runtime_telemetry_status() if hasattr(router, "runtime_telemetry_status") else {},
                 "capture_tool_arguments": config.local_proxy.capture_tool_arguments,
                 "policy_mode": config.local_proxy.policy_mode,
                 "allow_unmanaged_client_servers": config.local_proxy.allow_unmanaged_client_servers,
@@ -354,32 +357,42 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
-            heartbeat_task: asyncio.Task[None] | None = None
-            event_task: asyncio.Task[None] | None = None
+            runtime_started = False
+
+            async def finish_runtime() -> None:
+                # Registered first, so sessions and producers stop before the
+                # final event and drain, including when startup fails halfway.
+                with anyio.CancelScope(shield=True):
+                    try:
+                        if runtime_started:
+                            await emit_lifecycle_event(router, "runner_stopped")
+                    finally:
+                        if hasattr(router, "close_runtime_events"):
+                            await router.close_runtime_events()
+
+            stack.push_async_callback(finish_runtime)
             if local_proxy_app is not None:
                 await stack.enter_async_context(local_proxy_app.session_manager.run())
                 await emit_lifecycle_event(router, "runner_started")
+                runtime_started = True
                 if device_heartbeat_enabled(router):
-                    heartbeat_task = asyncio.create_task(
-                        router.run_device_heartbeat_loop(),
-                        name="lightnow-device-heartbeat",
-                    )
+                    task = asyncio.create_task(router.run_device_heartbeat_loop(), name="lightnow-device-heartbeat")
+                    stack.push_async_callback(cancel_background_task, task)
             for profile_app in profile_apps.values():
                 await stack.enter_async_context(profile_app.session_manager.run())
             if getattr(router, "managed_events_enabled", lambda: False)():
-                event_task = asyncio.create_task(router.run_managed_event_loop(), name="lightnow-managed-events")
-            try:
-                yield
-            finally:
-                if local_proxy_app is not None:
-                    await emit_lifecycle_event(router, "runner_stopped")
-                for task in (heartbeat_task, event_task):
-                    if task is not None:
-                        task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await task
+                task = asyncio.create_task(router.run_managed_event_loop(), name="lightnow-managed-events")
+                stack.push_async_callback(cancel_background_task, task)
+            yield
 
     return Starlette(routes=routes, lifespan=lifespan)
+
+
+async def cancel_background_task(task: asyncio.Task[None]) -> None:
+    with anyio.CancelScope(shield=True):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 async def emit_lifecycle_event(router: Any, event_type: str) -> None:
