@@ -60,9 +60,7 @@ def test_registry_listing_is_human_facing_and_contains_no_fixture_tools() -> Non
     assert "synthetic" not in serialized
 
 
-def test_public_copy_advertises_current_mcp_protocol() -> None:
+def test_pypi_readme_contains_registry_ownership_marker() -> None:
     readme = (ROOT / "README.md").read_text()
 
-    assert "MCP `2026-07-28`" in readme
-    assert "`server/discover`" in readme
-    assert "through `2025-11-25`" in readme
+    assert f"<!-- mcp-name: {load_listing()['name']} -->" in readme
