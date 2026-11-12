@@ -6,474 +6,176 @@
 [![Official MCP Registry](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.modelcontextprotocol.io%2Fv0.1%2Fservers%2Fio.github.lightnow-ai%252Flightnow-proxy%2Fversions%2Flatest&query=%24.server.version&label=Official%20MCP%20Registry&logo=modelcontextprotocol)](https://registry.modelcontextprotocol.io/?q=io.github.lightnow-ai%2Flightnow-proxy)
 [![Listed on LightNow](https://lightnow.ai/badge/io.github.lightnow-ai/lightnow-proxy?variant=listed)](https://lightnow.ai/servers/io.github.lightnow-ai/lightnow-proxy)
 
-**Connect your AI clients to your MCP servers—securely managed in one place.**
+Connect your AI clients to the MCP servers in your LightNow profiles.
 
-The LightNow MCP Proxy is the local runtime behind LightNow profiles.
-Connect Codex, Claude Desktop, Cursor, VS Code, or Antigravity once, then manage
-the MCP servers available to that client in LightNow instead of copying server
-configuration and secrets into every tool.
+The proxy runs on your computer. Your AI client connects to it, and the proxy
+routes requests to the local or remote MCP servers you configure in LightNow.
+You manage server connections and credentials in LightNow instead of maintaining
+a separate server configuration in each client.
 
-- Keep MCP access organized in personal and organization profiles.
-- Connect local `stdio` and remote Streamable HTTP servers through one entry.
-- Resolve credentials on the user's machine instead of embedding them in MCP
-  client configuration.
-- Apply profile and policy changes without rebuilding every client setup.
-- Observe client, profile, server health, and tool usage. Tool arguments are
-  captured by default with credential-like fields redacted and can be disabled;
-  tool results and resolved secrets are never collected.
+The **LightNow CLI** signs you in and configures your client. The **LightNow
+Proxy** runs the connection whenever the client needs MCP tools.
 
-The installed command remains `lightnow-proxy`. It runs locally, uses the
-identity-bound LightNow CLI session, resolves the selected profile, and routes
-tool and resource requests to the profile's MCP servers.
+## Get started
 
-## Capabilities come from your LightNow profile
+You need a [LightNow account](https://lightnow.ai/), an MCP client, and a Runtime profile containing the
+servers you want to use. Local servers also need their own runtimes, such as
+Node.js, Python or Docker, installed on your computer.
 
-The proxy deliberately does not ship demo tools. Its MCP capabilities are
-the real tools and resources exposed by the servers selected in the active
-LightNow profile, so the list differs between teams and clients. Names such as
-`github__create_issue` identify both the upstream server and its tool and avoid
-collisions when several servers use the same tool name.
+### 1. Install the CLI and proxy
 
-The proxy supports the official MCP `2026-07-28` revision with stateless,
-per-request protocol metadata and `server/discover`. It keeps automatic
-compatibility with handshake-era servers and clients through `2025-11-25`.
-
-Tool discovery reads complete pagination from the actual configured upstream.
-It fails explicitly on repeated cursors, duplicate exact names or limits of
-30 seconds, 100 pages, 2,000 tools and 4 MiB of definitions. A complete empty
-inventory stays distinct from incomplete discovery. Modern HTTP calls prepare
-their parameter-header schemas from that same fully discovered client.
-The managed dispatch primitive authorizes that inventory before sending once;
-schema-mismatch recovery and interactive retries must return to its policy gate.
-
-When Registry API requests an optional sanitized setup preview, the Proxy projects
-only public input IDs, binding booleans, typed placeholders and explicitly allowed
-public choice indexes from the native managed context. It does not parse launch
-commands or copy configuration values, files, endpoints or tool metadata into the
-preview. Unsupported or mismatched descriptors produce an unavailable preview
-without failing successful private discovery. Sharing remains a separate explicit
-API/UI action; this Proxy does not create or publish contributions. The full
-workflow is specified in [Registry API #1340](https://github.com/lightnow-ai/registry-api/pull/1340).
-
-For managed connections the existing device heartbeat declares
-`managed-connections.v1` and obtains the actor-owned runtime client ID, even when
-optional activity capture is disabled.
-Compatible synchronized proxies poll every 15 seconds and execute at most two
-queued private discoveries concurrently. They resolve the exact current assignment,
-compare queued profile, policy and credential revisions before opening the upstream,
-and report to the original request with If-Match. Shutdown cancels outstanding
-discovery work; failures report bounded codes without private definitions or raw
-upstream errors. Legacy presence-only clients retain the 120-second interval.
-Registry supplies the canonical connection, assignment and bounded bootstrap context. Complete private inventory reporting
-returns exact allowed original names from the same backend authorizer as dispatch.
-The Proxy filters discovery and checks that decision again on the actual upstream
-session before one business call. Expected managed denials return a normal MCP tool
-error containing a content-free reason code. Absolute expiry and a monotonic deadline both
-apply; reporting does not renew the lease. Managed contexts do not authorize
-resource methods. Synchronized profiles bypass persistent tool caches and stale
-fallbacks. Canonical aliases take precedence; required organization admission also
-excludes local static and legacy runtime overrides from the managed profile.
-Managed wire names use `ln_<full assignment UUID hex>__<original tool name>`.
-Descriptions and metadata retain readable aliases. Aliases containing underscores,
-renames, and replacement assignments therefore cannot transfer tool identity.
-The reserved UUID namespace cannot fall back to static/legacy routing after an
-assignment is removed; ordinary legacy tool names retain their existing form.
-
-Managed calls also retain content-free required evidence independently of optional
-activity capture. A private SQLite journal beside the CLI session commits each
-attempt before startup and handoff intent before dispatch. It retries only the
-original event UUIDs, subject and reporting receipt; it never retries a business
-call. Native OS locks distinguish live calls from interrupted ones. Lost outcomes
-stay unknown. The Registry's explicit `RUNTIME_PROFILE_FORBIDDEN` response records
-a denied call using its original reporting receipt; it is not an infrastructure
-outage. Unavailable storage or exhausted capacity blocks dispatch. Local
-`/status` exposes pending/unresolved counts and closed delivery codes. The bounded
-journal retains rejected/expired facts for explicit resolution. See
-[the evidence contract](docs/ARCHITECTURE.md#required-managed-call-evidence).
-
-
-
-
-## Install
-
-Requirements:
-
-- Python 3.11 or higher
-- `pipx`
-- a [LightNow account](https://www.lightnow.ai/)
-- the LightNow CLI
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python
+3.11 or later:
 
 ```sh
-pipx install lightnow-cli
-lightnow login
-```
-
-Install the proxy with Homebrew:
-
-```sh
-brew tap lightnow-ai/tap
-brew install lightnow-proxy
-```
-
-Or install it with `pipx`:
-
-```sh
-pipx install lightnow-proxy
-```
-
-Or install it with `uv`:
-
-```sh
+uv tool install lightnow-cli
 uv tool install lightnow-proxy
 ```
 
-The Python package installs the `lightnow-proxy` command used by MCP clients.
-
-For repository-local development:
+Alternatively, install both with Homebrew:
 
 ```sh
-uv tool install --from . lightnow-proxy
+brew tap lightnow-ai/tap
+brew install lightnow-cli lightnow-proxy
 ```
 
-Update supported CLI and Proxy installations through the LightNow CLI:
+Or with [pipx](https://pipx.pypa.io/stable/installation/):
+
+```sh
+pipx install lightnow-cli
+pipx install lightnow-proxy
+```
+
+### 2. Sign in and connect a client
+
+If your client already has MCP servers,
+[import the configuration](https://docs.lightnow.ai/how-to/import-existing-mcp-config)
+into a LightNow profile before syncing. Review the import preview to choose
+which connections to keep.
+
+```sh
+lightnow login
+lightnow sync --client codex --local-proxy --profile default
+```
+
+Use your profile's name in place of `default` if you have created a different
+profile. The CLI writes the client entry and its proxy configuration. Restart
+the client after syncing, then check its MCP tools list.
+
+The CLI provides Local Proxy configuration for these clients:
+
+| Client | `--client` value |
+| --- | --- |
+| Codex | `codex` |
+| Claude Code | `claude-code` |
+| Claude Desktop | `claude-desktop` |
+| Cursor | `cursor` |
+| VS Code | `vscode` |
+| Google Antigravity | `antigravity` |
+| Gemini CLI | `gemini-cli` |
+
+For example, to configure Claude Code:
+
+```sh
+lightnow sync --client claude-code --local-proxy --profile default
+```
+
+See the [client setup guide](https://docs.lightnow.ai/getting-started/sync-mcp-clients)
+for client-specific instructions and configuration paths.
+
+### 3. Check the connection
+
+For the Codex connection created above:
+
+```sh
+lightnow config-status --client codex
+lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
+```
+
+`config-status` checks the client setup. `--health` resolves the profile and
+contacts its servers to check tool discovery. It reports `healthy`, `degraded`
+or `failed`, with details for each server. Add `--json` for machine-readable
+output.
+
+## Use profiles and organization connections
+
+Choose which servers a client can use through its Runtime profile in LightNow.
+The available tools come from those servers; the proxy includes no built-in
+business tools. It supports local stdio servers and remote Streamable HTTP
+servers, as well as resources exposed by those servers.
+
+To add an organization connection, replace the organization ID and profile name
+with your own values:
+
+```sh
+lightnow sync --client codex --local-proxy \
+  --connection lightnow-team --tenant <organization-id> --profile engineering
+```
+
+Sign in with the intended account before syncing. Give each connection a distinct
+`lightnow-…` alias when connecting several accounts or organizations to the same
+client. Existing connections stay bound to the account used to create them.
+
+See [Runtime profiles](https://docs.lightnow.ai/getting-started/integrations-and-runtime-profiles)
+for server selection, credentials and organization access.
+
+## Activity and privacy
+
+LightNow can show client presence, connection health and MCP request activity in
+the Control Plane. Runtime events include information such as the client,
+profile, server, tool name, outcome and duration.
+
+Optional activity capture and tool-argument capture have separate settings.
+Argument capture is enabled by default; credential-like fields are redacted.
+Managed connection events omit argument values. Tool results, resource contents
+and resolved credentials are excluded from runtime events.
+
+Managed connections also record the execution metadata required for their audit
+history, independently of optional activity capture. Optional activity reporting
+is best effort, so a missing event does not establish whether a tool ran.
+
+See [Inspect runtime events](https://docs.lightnow.ai/how-to/inspect-runtime-events)
+for the available views and capture settings, and
+[Architecture](docs/ARCHITECTURE.md) for the request and data flows.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| The client cannot start `lightnow-proxy` | Confirm the proxy is installed and available on `PATH`, then sync again and restart the client. |
+| Tools are missing | Check the selected profile, organization access and tool selection in LightNow. Run `--health` against that connection's generated YAML. |
+| A local server cannot start | Check that its executable, runtime and required credentials are available on this computer. |
+| The connection uses an unexpected account | Check which account owns the connection and sync it again under the intended account. |
+
+Named connections have separate proxy files. For the `lightnow-team` example,
+use `~/.lightnow/lightnow-proxy/codex-lightnow-team.yaml` with `--config`.
+
+For configuration help, see
+[Manage runtime secrets and config](https://docs.lightnow.ai/how-to/manage-runtime-secrets-and-config).
+
+## Updates
 
 ```sh
 lightnow update --check
 lightnow update
 ```
 
-Homebrew, pipx and uv are managed. The proxy only reports its observed version
-and update state in metadata-only heartbeats; it never invokes a package manager
-or delays MCP startup to check for releases.
+The CLI supports updates for Homebrew, pipx and uv installations. Restart your
+MCP client after updating the proxy.
 
-## Configure a Client
+## Contributing
 
-Use the LightNow CLI. It writes the client MCP entry and the per-client Local
-Proxy config.
+Use Python 3.11 or later and uv to work on the source:
 
 ```sh
-lightnow sync --client codex --local-proxy
-lightnow sync --client claude-desktop --local-proxy
-lightnow sync --client cursor --local-proxy
-lightnow sync --client vscode --local-proxy
-lightnow sync --client antigravity --local-proxy
+uv sync --locked --extra dev
+uv run --locked --extra dev ruff check src tests examples
+uv run --locked --extra dev pytest -q
 ```
 
-Restart the MCP client after syncing.
+See the [contribution guidelines](https://github.com/lightnow-ai/.github/blob/main/CONTRIBUTING.md)
+and [release guide](docs/release.md).
 
-### Multiple accounts and organizations
+## License
 
-Use a distinct `--connection` alias for every account, organization or profile
-that should appear in the same MCP client:
-
-```sh
-lightnow login
-lightnow sync --client codex --local-proxy \
-  --connection lightnow-personal --profile default
-
-# Sign in with the organization account before creating this connection.
-lightnow login
-lightnow sync --client codex --local-proxy \
-  --connection lightnow-acme --tenant <tenant-id> --profile engineering
-```
-
-Each generated proxy config has a stable connection ID and points to one named
-CLI session under `~/.lightnow/sessions/`. It also records the expected issuer
-and subject. The proxy refuses Registry requests when those values do not
-match, so a later CLI login cannot silently switch an existing connection. No
-access or refresh token is written to the proxy YAML.
-
-Check the local setup:
-
-```sh
-lightnow config-status --client codex
-```
-
-Check whether the proxy can resolve the selected profile and reach its upstream
-MCP servers:
-
-```sh
-lightnow-proxy --health
-lightnow-proxy --health --json
-```
-
-By default this reads `~/.lightnow/lightnow-proxy/default.yaml`, which is written
-when the default profile is synced into Local Proxy mode. For a client-specific
-config, pass the generated path explicitly:
-
-```sh
-lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health
-lightnow-proxy --config ~/.lightnow/lightnow-proxy/codex.yaml --health --json
-```
-
-Named connections use separate files such as
-`~/.lightnow/lightnow-proxy/codex-lightnow-acme.yaml`. The JSON health report
-shows their non-secret connection alias, ID, account label, scope, profile and
-identity-binding status. Legacy configs that use `cli_config_path` remain
-readable, but are restricted to the configured authentication issuer.
-
-When telemetry is enabled, active health checks and runtime events are sent to
-the LightNow Control Plane. Tool-call arguments are captured by default and can
-be disabled independently in the Local Proxy settings. Credential-like fields
-are redacted before transmission. The proxy also sends device
-presence immediately at startup and every two minutes. The Control Plane can
-then show which devices, clients and profiles are active, healthy, degraded, or
-failing, along with CLI/Proxy versions and update status. Tool results, resolved
-LightNow secrets, unredacted authorization values, network addresses, hardware
-identifiers and local paths are not stored. Credential-like argument fields,
-including authorization headers, are replaced with `[REDACTED]` before transmission.
-
-Vault providers configured for runtime resolution are resolved on this host,
-after Registry API has returned a provider reference without credentials or a
-secret value. HashiCorp Vault Proxy auto-auth on `127.0.0.1:8200` is the
-default. Provider-specific loopback listeners can be mapped under
-`runtime_secrets.providers` in the generated YAML; LightNow CLI preserves these
-non-secret mappings on subsequent syncs. The optional OS-keyring path is
-available with `lightnow-proxy[keyring]`. Resolution failures are fail-closed
-and plaintext values are never added to the tool-schema cache.
-
-Version-pinned KV2 references are read using their exact Vault version. The
-reader checks the returned version, rejects deleted/destroyed versions and, for
-LightNow write operations, verifies the operation identifier before injecting a
-value. The installed reader declares `secret-store.versioned-read.v1` in the
-existing device registration and runtime header independently of any writer.
-A missing or mismatched version
-fails the request; it never falls back to the latest Vault value.
-
-An enrolled organization connector authenticates with its own OAuth client and
-local RSA private key using standard `private_key_jwt`. Its Registry connection
-uses `client_private_key_file`, `client_key_id` and `client_scope` alongside the
-enrollment's `client_id` and `token_url`. Protect the key file with the operating
-system's credential-file permissions; only its public JWK belongs in enrollment.
-This mode cannot share a personal CLI session or fall back to a client secret.
-Machine tokens renew before expiry, and replacing the local key invalidates the
-cached token. These authentication settings alone do not enroll or authorize a
-connector; the server must separately admit its current enrollment and provider.
-
-### Opt-in private Secret Store worker
-
-The worker is disabled by default. Its journal requires native POSIX ownership
-and a private `0700` directory; unsupported ownership validation fails configuration.
-Existing nonprivate directories are rejected without changing their permissions.
-Enable it only on the enrolled executor with
-an explicit local provider mapping. It executes server-issued KV2 writes and
-exact-version readbacks; it never invents a Vault path or migrates existing
-secrets. Registry authorization, provider/Store policy and current enrollment
-remain required on every claim and result.
-
-For a personal proxy, keep the normal identity-bound generated CLI configuration
-(`registry_api.use_cli_session`, `expected_issuer`, `expected_subject` and observed
-`local_proxy` device/client IDs). It must use the personal context, with no tenant
-in either configuration or the current CLI session. Add:
-
-```yaml
-runtime_secrets:
-  worker_enabled: true
-  journal_path: ~/.lightnow/secret-store/operations.sqlite3
-  poll_interval_seconds: 5
-  providers:
-    11111111-1111-4111-8111-111111111111: # Replace with the enrolled provider ID.
-      auth_mode: vault-proxy
-      vault_proxy_url: http://127.0.0.1:8200
-```
-
-Start the regular MCP proxy:
-
-```sh
-lightnow-proxy --config ~/.lightnow/lightnow-proxy/default.yaml --transport stdio
-```
-
-Its existing heartbeat receives personal work and schedules the actual worker.
-Only after the worker validates its fresh personal session does registration and
-the runtime header include `secret-store.operations.v1`. Switching the CLI session
-to an organization disables this personal writer; it does not become a tenant
-writer. A normal tenant proxy can still read authorized versioned references
-using the separate reader capability, without enabling the worker.
-
-An organization connector uses its separately enrolled machine identity and an
-explicit connector ID. It runs outbound only, without an MCP/HTTP listener:
-
-```yaml
-auth:
-  enabled: false
-  issuer: https://identity.example/realms/lightnow
-registry_api:
-  enabled: true
-  base_url: https://registry-api.example/v0.1
-  expected_issuer: https://identity.example/realms/lightnow
-  token_url: https://identity.example/realms/lightnow/protocol/openid-connect/token
-  client_id: enrolled-connector-client
-  client_private_key_file: ~/.lightnow/secret-store/connector.pem
-  client_key_id: enrolled-key-id
-  client_scope: secret-store.operations.v1
-local_proxy:
-  enabled: false
-runtime_secrets:
-  worker_enabled: true
-  connector_id: 22222222-2222-4222-8222-222222222222
-  journal_path: ~/.lightnow/secret-store/connector.sqlite3
-  poll_interval_seconds: 5
-  providers:
-    11111111-1111-4111-8111-111111111111:
-      auth_mode: vault-proxy
-      vault_proxy_url: http://127.0.0.1:8200
-profiles:
-  worker: {}
-upstreams: {}
-```
-
-Replace the example origins/IDs with the exact enrollment values and protect the
-configuration/key with mode `0600`. Use `registry_api.ca_file` for a private
-Registry/identity CA. Provider mappings support the existing local Vault Proxy
-and TLS/keyring settings; no bootstrap credential is delivered by Registry.
-
-```sh
-lightnow-proxy --config ~/.lightnow/secret-store/connector.yaml --secret-store-worker
-```
-
-Stop either process with Ctrl-C (or the owning service's normal TERM stop).
-Restart with the same configuration and journal. Set `worker_enabled: false` to
-stop automatic execution on the next startup. An organization connector cannot
-start in the ordinary server mode and cannot borrow a personal token or client
-secret. It processes only its current machine-authorized organization/provider
-pool; reading the resulting MCP credential remains the normal tenant proxy's job.
-
-The separate SQLite journal contains only identity/operation/claim IDs, phase and
-expiry. It stores the request ID durably **before** claiming and records dispatch
-**before** IO. A namespace lock serializes processes across claim/IO/result; the
-namespace binds API, issuer, subject, OAuth client and exact runtime client or
-connector. Files use `0600`, the parent directory `0700`. No values, value hashes
-or claim payloads are journaled. Lost responses and restarts reuse the same
-request ID and can only read back an already dispatched write. Unknown outcomes
-and authorization errors retain the nonce; local clock/TTL expiry never permits
-a new write. Only a confirmed terminal receipt or the authorized server response
-`data: null` completes it. Terminal tombstones remain at least ten minutes;
-the journal caps at 1,024 rows and stops new admissions when full. Do not delete
-or reset a journal to retry uncertain work. Restore the original identity and
-let the server's canonical expiry/receipt reconcile it instead.
-
-An active worker with the OAuth executor also advertises `secret-store.oauth.v1`.
-Its typed `oauth.write`, `oauth.refresh` and `oauth.readback` claims keep access
-headers and refresh grants at separate server-bound KV2 paths. Native Authlib
-uses the recorded client authentication, redirect URI and MCP resource for one
-refresh; an omitted refresh token retains the prior token. Both exact-version
-readbacks must match before the worker attests the pair. Only Registry activates
-the references after current authorization. No token values are journaled.
-
-Lost refresh responses or partial KV writes remain uncertain. Restart uses the
-same request ID and **GET-only** pair readback, never another refresh or POST.
-Missing material requires reconciliation or explicit reconnect; there is no
-fallback to LightNow storage. OAuth HTTPS uses the normal trusted CA configuration
-(including `SSL_CERT_FILE` for an explicitly trusted private CA), without disabling
-certificate verification or following redirects. Deployment still requires the
-matching Registry protocol and its separately authorized connector enrollment.
-
-### Managed runtime files
-
-STDIO servers may attach bounded, non-secret `runtime_files` to their Runtime
-Profile client configuration. LightNow Proxy writes each file set below
-`~/.lightnow/runtime-files` in an immutable content-addressed directory before
-the upstream process starts. Files use mode `0600`; managed directories use
-mode `0700`.
-
-Reference the resolved directory with `${LIGHTNOW_RUNTIME_DIR}` in arguments,
-environment values, or the working directory:
-
-```json
-{
-  "transport": "stdio",
-  "command": "npx",
-  "args": [
-    "@bytebase/dbhub@latest",
-    "--config",
-    "${LIGHTNOW_RUNTIME_DIR}/dbhub.toml"
-  ],
-  "env": {
-    "DBHUB_DSN": "${DBHUB_DSN}"
-  },
-  "runtime_files": [
-    {
-      "path": "dbhub.toml",
-      "content": "[[sources]]\nid = \"analytics\"\ndsn = \"${DBHUB_DSN}\"\n"
-    }
-  ]
-}
-```
-
-Runtime files are UTF-8 text and are limited to 16 files, 64 KiB per file, and
-256 KiB per server configuration. Paths must be relative and cannot contain
-traversal segments or backslashes. Secret values must remain in LightNow's
-runtime secret buckets; files may refer to the corresponding environment names
-but must not embed plaintext credentials. Invalid or modified materializations
-fail closed before the upstream starts.
-
-## More Documentation
-
-Detailed setup guides, examples, diagrams, supported client paths, telemetry
-behavior and troubleshooting live in the LightNow docs:
-
-- [Connect MCP clients](https://docs.lightnow.ai/getting-started/sync-mcp-clients)
-- [CLI reference](https://docs.lightnow.ai/reference/cli)
-- [Release process](https://github.com/lightnow-ai/lightnow-proxy/blob/main/docs/release.md)
-
-## Local Development
-
-For contributors working on this repository:
-
-```sh
-uv venv
-uv pip install -e .[dev]
-make test
-```
-
-Jenkins builds the runtime image, runs the Ruff and pytest commands from
-`make lint test` inside it, then checks `lightnow-proxy --help`.
-The checkout is mounted read-only and test environments live in the container.
-The `Jenkinsfile` uses the native
-`build-agent` capability pool and removes only its own validation image. The timeout includes agent allocation.
-GitHub Actions continues to run the Python version matrix. Before merging an
-Ops dependency update, require terminal Jenkins success at the current PR head.
-The pipeline validates changes without publishing an image or changing accounts.
-
-Run the proxy with the example config:
-
-```sh
-uv run lightnow-proxy --config config.example.yaml
-```
-
-Run the proxy as a stdio MCP server:
-
-```sh
-uv run lightnow-proxy --config config.example.yaml --transport stdio
-```
-
-Run a local health check against the example config:
-
-```sh
-uv run lightnow-proxy --config config.example.yaml --health
-```
-
-## Runtime telemetry and current profile resolution
-
-Optional runtime telemetry uses one background sender with at most 128 queued
-messages plus one in-flight message and a 1 MiB total payload budget. It does not
-hold MCP tool responses while the Registry receives the event. `/status` exposes
-pending, sent, failed and dropped counts under `local_proxy.telemetry_delivery`.
-Delivery errors and buffer loss use content-free warnings. Normal HTTP/stdio and
-one-shot command shutdown drains for at most two seconds before cancelling the
-sender and accounting for abandoned events. Optional telemetry is best effort;
-SIGKILL or forced termination can lose it. Mandatory managed audit facts retain
-the existing durable local outbox, pre-dispatch commit and asynchronous upload.
-
-After discovery or a successful lookup, the router remembers only the selected
-profile/namespace-to-alias lookup hint. Each tool call still fetches a fresh,
-filtered Registry response with current profile access, organization admission,
-configuration and managed assignment identity. It does not cache permissions,
-credentials, contexts or leases. Changed/missing hints use the original complete
-lookup; a renamed or replaced alias cannot transfer an assignment's UUID tool
-identity. The existing upstream inventory/authorization gate remains before the
-single actual managed business dispatch. Ambiguous legacy wire names retain the
-complete longest-prefix routing check. No Registry API change is required.
-
-Local regression checks: `uv run --extra dev pytest` and `uv run --extra dev ruff check .`.
-Transport latency should be compared separately from hosted model inference.
+[Apache License 2.0](LICENSE).
