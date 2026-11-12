@@ -153,26 +153,31 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
             active_capture_path,
             observe_client_context,
         )
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(forward_messages)
-            if router.device_heartbeat_enabled():
-                task_group.start_soon(router.run_device_heartbeat_loop)
-            if router.managed_events_enabled():
-                task_group.start_soon(router.run_managed_event_loop)
-            try:
-                await router.emit_lifecycle_event("runner_started")
-                await server.run(
-                    captured_read_stream,
-                    write_stream,
-                    server.create_initialization_options(),
-                )
-            finally:
-                task_group.cancel_scope.cancel()
-                with anyio.CancelScope(shield=True):
-                    try:
-                        await router.emit_lifecycle_event("runner_stopped")
-                    finally:
-                        await router.close_runtime_events()
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(forward_messages)
+                if router.device_heartbeat_enabled():
+                    task_group.start_soon(router.run_device_heartbeat_loop)
+                if router.managed_events_enabled():
+                    task_group.start_soon(router.run_managed_event_loop)
+                try:
+                    await router.emit_lifecycle_event("runner_started")
+                    await server.run(
+                        captured_read_stream,
+                        write_stream,
+                        server.create_initialization_options(),
+                    )
+                finally:
+                    task_group.cancel_scope.cancel()
+        finally:
+            # Leaving the group first joins the cancelled uploader, so it cannot
+            # race the final delivery or retain its upload lock during shutdown.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await router.close_managed_events()
+                    await router.emit_lifecycle_event("runner_stopped")
+                finally:
+                    await router.close_runtime_events()
 
 
 if __name__ == "__main__":

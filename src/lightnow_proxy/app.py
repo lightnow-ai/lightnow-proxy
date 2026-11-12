@@ -364,6 +364,8 @@ def create_app(
                 # final event and drain, including when startup fails halfway.
                 with anyio.CancelScope(shield=True):
                     try:
+                        if hasattr(router, "close_managed_events"):
+                            await router.close_managed_events()
                         if runtime_started:
                             await emit_lifecycle_event(router, "runner_stopped")
                     finally:

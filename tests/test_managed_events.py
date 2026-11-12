@@ -205,6 +205,115 @@ async def test_required_uploader_runs_with_optional_telemetry_and_presence_disab
 
 
 @pytest.mark.asyncio
+async def test_short_http_session_delivers_final_required_facts_before_next_upload_cycle(tmp_path, monkeypatch):
+    router = managed_router(tmp_path)
+    identity = await router.registry_client.managed_report_identity()
+    box = router._event_outbox()
+    first_cycle = asyncio.Event()
+    original_flush = router.flush_managed_events
+
+    async def observed_flush():
+        await original_flush()
+        first_cycle.set()
+
+    monkeypatch.setattr(router, "flush_managed_events", observed_flush)
+    delivered = []
+
+    def endpoint(request):
+        event = json.loads(request.content)
+        delivered.append(event)
+        return httpx.Response(201, json={"event": event})
+
+    with respx.mock(assert_all_called=True) as api:
+        api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=endpoint)
+        app = create_app(router.config, router=router)
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(first_cycle.wait(), 1)
+            for _ in range(2):
+                call = box.begin(lease(), identity)
+                for phase in ["dispatch_started", "succeeded"]:
+                    box.record(call, phase)
+                call.release()
+            expected = box.pending(identity)
+            assert len(expected) == 8 and delivered == []
+    assert delivered == expected
+    assert box.status()["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_final_required_delivery_has_deadline_and_retains_identical_unacknowledged_facts(tmp_path, monkeypatch):
+    router = managed_router(tmp_path)
+    identity = await router.registry_client.managed_report_identity()
+    box = router._event_outbox()
+    call = box.begin(lease(), identity)
+    box.record(call, "denied", "TOOL_NOT_SELECTED")
+    call.release()
+    expected = box.pending(identity)
+    entered = asyncio.Event()
+
+    async def stalled_endpoint(_request):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("lightnow_proxy.router.MANAGED_EVENT_DRAIN_SECONDS", .15)
+    # respx records completed responses; this request is deliberately cancelled.
+    with respx.mock(assert_all_called=False) as api:
+        api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=stalled_endpoint)
+        await asyncio.wait_for(router.close_managed_events(), 1)
+    assert entered.is_set()
+    assert box.pending(identity) == expected
+    assert router.managed_event_status()["delivery_error"] == "REPORT_DELIVERY_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_stdio_eof_flushes_required_facts_after_joining_the_background_uploader(tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+    import anyio
+    from mcp import ClientSession
+    from lightnow_proxy import main
+
+    router = managed_router(tmp_path)
+    box = router._event_outbox()
+    identity = await router.registry_client.managed_report_identity()
+    client_send, server_receive = anyio.create_memory_object_stream(0)
+    server_send, client_receive = anyio.create_memory_object_stream(0)
+
+    @asynccontextmanager
+    async def memory_stdio():
+        async with server_receive, server_send:
+            yield server_receive, server_send
+
+    monkeypatch.setattr(main, "stdio_server", memory_stdio)
+    monkeypatch.setattr(main, "ToolRouter", lambda _config: router)
+    delivered = []
+
+    def endpoint(request):
+        event = json.loads(request.content)
+        delivered.append(event)
+        return httpx.Response(201, json={"event": event})
+
+    with respx.mock(assert_all_called=True) as api:
+        api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=endpoint)
+        serving = asyncio.create_task(main.run_stdio(router.config))
+        try:
+            async with ClientSession(client_receive, client_send) as client:
+                await client.initialize()
+                call = box.begin(lease(), identity)
+                box.record(call, "denied", "TOOL_NOT_SELECTED")
+                call.release()
+                expected = box.pending(identity)
+                assert delivered == []
+            await client_send.aclose()
+            await asyncio.wait_for(serving, 2)
+        finally:
+            if not serving.done():
+                serving.cancel()
+                await asyncio.gather(serving, return_exceptions=True)
+    assert delivered == expected
+    assert box.status()["pending"] == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure,phase", [("upstream_error", "upstream_failed"), ("transport_loss", "outcome_unknown"),
                                           ("cancelled", "outcome_unknown")])
 async def test_response_transport_loss_and_cancellation_have_distinct_immutable_outcomes(tmp_path, failure, phase):
