@@ -62,7 +62,11 @@ jobs:
             fi
           fi
 
+          # The tag also starts the PyPI release workflow. Wait for that exact
+          # package version before publishing its Registry metadata.
           curl --fail --silent --show-error \
+            --retry 60 --retry-delay 5 --retry-all-errors \
+            --max-time 15 --retry-max-time 600 \
             "https://pypi.org/pypi/lightnow-proxy/${manifest_version}/json" \
             >/dev/null
 
