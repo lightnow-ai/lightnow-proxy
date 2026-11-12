@@ -290,6 +290,7 @@ async def test_router_loads_local_proxy_upstreams_from_lightnow_profile() -> Non
     tools = await router.list_tools("default")
 
     assert [tool.name for tool in tools] == ["grafana__query"]
+    await router.flush_runtime_events()
     assert registry_client.events[0]["event_type"] == "list_tools"
     assert registry_client.events[0]["status"] == "success"
 
@@ -352,6 +353,7 @@ async def test_router_list_tools_skips_unavailable_upstreams() -> None:
     tools = await router.list_tools("default")
 
     assert [tool.name for tool in tools] == ["jenkins__getStatus"]
+    await router.flush_runtime_events()
     assert registry_client.events[0]["event_type"] == "list_tools"
     assert registry_client.events[0]["status"] == "success"
 
@@ -416,6 +418,7 @@ async def test_router_lists_upstream_tools_concurrently() -> None:
 
     assert [tool.name for tool in tools] == ["first__query", "second__query"]
     assert elapsed < 0.09
+    await router.flush_runtime_events()
     assert registry_client.events[0]["event_type"] == "list_tools"
     assert registry_client.events[0]["status"] == "success"
 
@@ -528,6 +531,7 @@ async def test_router_resolves_only_target_lightnow_upstream_for_tool_calls() ->
 
     assert result.is_error is not True
     assert registry_client.fetch_all_called is False
+    await router.flush_runtime_events()
     assert registry_client.events[0]["server_alias"] == "jenkins"
     assert registry_client.events[0]["server_name"] == "custom:jenkins"
 
@@ -588,6 +592,7 @@ async def test_router_emits_call_tool_event_with_arguments_by_default() -> None:
     )
 
     assert result.is_error is not True
+    await router.flush_runtime_events()
     event = registry_client.events[0]
     assert event["profile"] == "default"
     assert event["event_type"] == "call_tool"
@@ -669,6 +674,7 @@ async def test_router_can_disable_tool_argument_capture_without_disabling_teleme
         {"owner": "lightnow-ai", "repo": "registry-api", "issue_number": 388},
     )
 
+    await router.flush_runtime_events()
     event = registry_client.events[0]
     assert event["argument_keys"] == ["issue_number", "owner", "repo"]
     assert event["arguments_captured"] is False
@@ -709,12 +715,13 @@ async def test_router_maps_antigravity_conversation_to_generic_client_context() 
         "jenkins__whoAmI",
         {},
         {
-            "antigravity.google/artifacts_dir": "/Users/nils/.gemini/antigravity/brain/private",
+            "antigravity.google/artifacts_dir": "/home/example/.gemini/antigravity/brain/private",
             "antigravity.google/conversation_id": "36326ddf-b460-4e49-9015-f796dba21110",
             "progressToken": "must-not-be-stored",
         },
     )
 
+    await router.flush_runtime_events()
     event = registry_client.events[0]
     assert event["client_name"] == "antigravity-client"
     assert event["mcp_client_name"] == "antigravity-client"
@@ -728,7 +735,7 @@ async def test_router_maps_antigravity_conversation_to_generic_client_context() 
     assert event["client_context_thread_id"] == "36326ddf-b460-4e49-9015-f796dba21110"
     assert event["client_context_metadata"] == {"adapter": "antigravity", "progress_reported": True}
     assert "artifacts_dir" not in str(event["client_context_metadata"])
-    assert "/Users/nils" not in str(event)
+    assert "/home/example" not in str(event)
     assert "must-not-be-stored" not in str(event)
     assert "codex_thread_id" not in event
     assert "client_context_turn_id" not in event
@@ -804,6 +811,7 @@ async def test_router_uses_initialize_client_version_for_runtime_events() -> Non
 
     await router.list_tools("default")
 
+    await router.flush_runtime_events()
     event = registry_client.events[0]
     assert event["client_name"] == "Claude Desktop"
     assert event["mcp_client_name"] == "Claude Desktop"
@@ -851,6 +859,7 @@ async def test_router_lists_and_reads_resources_without_contents_in_events() -> 
     result = await router.read_resource("default", str(resources[0].uri))
 
     assert result.contents[0].text == "must-stay-local"
+    await router.flush_runtime_events()
     assert registry_client.events[0]["event_type"] == "list_resources"
     assert registry_client.events[0]["response_items_count"] == 1
     assert registry_client.events[1]["event_type"] == "read_resource"
