@@ -7,9 +7,12 @@ import logging
 from pathlib import Path
 import threading
 import time
+from urllib.parse import parse_qs
 
 from filelock import FileLock, Timeout as FileLockTimeout
 import httpx
+import httpx2
+import jwt
 import pytest
 import respx
 
@@ -24,7 +27,151 @@ from lightnow_proxy.registry import (
     upstream_config_from_client_config,
     upstream_config_from_runtime_context,
 )
-from lightnow_proxy.runtime_secrets import RuntimeSecretResolver
+from lightnow_proxy.runtime_secrets import RuntimeSecretError, RuntimeSecretResolver
+
+
+@pytest.mark.asyncio
+async def test_machine_key_authentication_uses_native_rfc7523_and_rotates_without_secret_fallback(tmp_path, monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    import lightnow_proxy.registry as registry_module
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_file = tmp_path / "own-client-key.pem"
+
+    def write_key():
+        key_file.write_bytes(private_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+        ))
+        key_file.chmod(0o600)
+
+    write_key()
+    config = RegistryApiConfig(base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+                               client_id="own-connector", client_private_key_file=str(key_file),
+                               client_key_id="first-key", client_scope="secret-store.operations.v1")
+    requests = []
+
+    def token_endpoint(request):
+        form = parse_qs(request.content.decode())
+        assert form["grant_type"] == ["client_credentials"]
+        assert form["scope"] == ["secret-store.operations.v1"]
+        assert "client_secret" not in form
+        assert b"PRIVATE KEY" not in request.content
+        assertion = form["client_assertion"][0]
+        assert form["client_assertion_type"] == ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"]
+        claims = jwt.decode(assertion, private_key.public_key(), algorithms=["RS256"],
+                            audience=str(config.token_url), issuer=config.client_id,
+                            options={"require": ["exp", "iat", "jti", "sub", "iss", "aud"]})
+        assert claims["sub"] == config.client_id
+        assert jwt.get_unverified_header(assertion)["kid"] == config.client_key_id
+        requests.append(True)
+        return httpx2.Response(200, json={"access_token": "issued-token-" + str(len(requests)), "expires_in": 300})
+
+    native_client = registry_module.AsyncOAuth2Client
+
+    def isolated_client(*args, **kwargs):
+        assert kwargs["follow_redirects"] is False
+        return native_client(*args, **kwargs, transport=httpx2.MockTransport(token_endpoint))
+
+    monkeypatch.setattr(registry_module, "AsyncOAuth2Client", isolated_client)
+    client = RegistryApiClient(config)
+    assert await client._client_credentials_token() == "issued-token-1"
+    assert await client._client_credentials_token() == "issued-token-1"
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    write_key()
+    config.client_key_id = "rotated-key"
+    assert await client._client_credentials_token() == "issued-token-2"
+    assert len(requests) == 2
+    key_file.unlink()
+    with pytest.raises(RegistryApiError, match="authentication key is unavailable"):
+        await client._client_credentials_token()
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("extra", [
+    {"client_private_key_file": "/unused/key.pem"},
+    {"client_key_id": "own-key"},
+    {"client_private_key_file": "/unused/key.pem", "client_key_id": "own-key", "client_secret": "forbidden"},
+    {"client_private_key_file": "/unused/key.pem", "client_key_id": "own-key", "use_cli_session": True},
+])
+def test_machine_key_configuration_cannot_borrow_personal_or_secret_authentication(extra):
+    with pytest.raises(ValueError, match="private_key_jwt"):
+        RegistryApiConfig(base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+                          client_id="own-connector", **extra)
+
+
+@pytest.mark.asyncio
+async def test_client_credentials_are_reacquired_before_expiry_and_after_rotation(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("lightnow_proxy.registry.monotonic", lambda: clock[0])
+    config = RegistryApiConfig(base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+                               client_id="own-client", client_secret="own-bootstrap")
+    client = RegistryApiClient(config)
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.example.test/token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "first-token", "expires_in": 60}),
+            httpx.Response(200, json={"access_token": "renewed-token", "expires_in": 60}),
+            httpx.Response(200, json={"access_token": "rotated-token", "expires_in": 60}),
+        ])
+        assert await client._client_credentials_token() == "first-token"
+        clock[0] = 150
+        assert await client._client_credentials_token() == "first-token"
+        clock[0] = 155
+        assert await client._client_credentials_token() == "renewed-token"
+        config.client_secret = "own-rotated-bootstrap"
+        assert await client._client_credentials_token() == "rotated-token"
+        assert len(route.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_share_one_current_client_token() -> None:
+    client = RegistryApiClient(RegistryApiConfig(
+        base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+        client_id="own-client", client_secret="own-bootstrap",
+    ))
+    async def issue_token(_request):
+        await asyncio.sleep(0)
+        return httpx.Response(200, json={"access_token": "current-token", "expires_in": 300})
+
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.example.test/token").mock(side_effect=issue_token)
+        assert await asyncio.gather(*(client._client_credentials_token() for _ in range(8))) == ["current-token"] * 8
+        assert len(route.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_token_without_expiry_is_not_cached_indefinitely() -> None:
+    client = RegistryApiClient(RegistryApiConfig(
+        base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+        client_id="own-client", client_secret="own-bootstrap",
+    ))
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post("https://auth.example.test/token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "first-token"}),
+            httpx.Response(200, json={"access_token": "second-token"}),
+        ])
+        assert await client._client_credentials_token() == "first-token"
+        assert await client._client_credentials_token() == "second-token"
+        assert len(route.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_renewal_does_not_reuse_an_expired_client_token(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("lightnow_proxy.registry.monotonic", lambda: clock[0])
+    client = RegistryApiClient(RegistryApiConfig(
+        base_url="https://registry.example.test", token_url="https://auth.example.test/token",
+        client_id="own-client", client_secret="own-bootstrap",
+    ))
+    with respx.mock(assert_all_called=True) as router:
+        router.post("https://auth.example.test/token").mock(side_effect=[
+            httpx.Response(200, json={"access_token": "expired-token", "expires_in": 60}),
+            httpx.Response(401, json={"error": "invalid_client"}),
+        ])
+        assert await client._client_credentials_token() == "expired-token"
+        clock[0] = 200
+        with pytest.raises(httpx.HTTPStatusError):
+            await client._client_credentials_token()
 
 
 def test_runtime_http_context_becomes_streamable_http_upstream() -> None:
@@ -1521,3 +1668,88 @@ async def test_cancelled_release_waits_for_real_file_lock_cleanup(tmp_path) -> N
 
     with FileLock(lock_path, timeout=0.1):
         pass
+
+
+@pytest.fixture
+def custom_oauth_profile_item():
+    # The native Custom profile response: canonical config and a separate,
+    # transport-bound context. Private OAuth contributes only a pinned header.
+    binding = {
+        "provider": {"id": "provider-uuid", "provider_type": "vault_kv_v2", "resolution_mode": "runtime",
+                     "config": {"address": "https://vault.internal"}},
+        "locator": {"path": "secret/data/lightnow/custom/access", "field": "value", "version": 3,
+                    "operation_id": "11111111-2222-4333-8444-555555555555"},
+        "target": {"type": "header", "name": "Authorization"},
+    }
+    return {
+        "alias": "own-oauth-custom", "server_name": "custom:own-oauth-custom", "version": None,
+        "status": "custom", "transport": "http",
+        "client_config": {"transport": "http", "url": "https://canonical.example.test/mcp",
+                          "headers": {"X-Profile": "default"}},
+        "external_secret_bindings": [binding],
+        "context": {"probe_request": {"transport": "http", "http": {
+            "url": "https://canonical.example.test/mcp", "headers": {"X-Profile": "default"}}},
+            "fetch_plan": None, "external_secret_bindings": [binding], "meta": {"source": "custom"}},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_type", ["personal", "tenant"])
+async def test_custom_profile_fetch_resolves_its_pinned_oauth_header(tmp_path, custom_oauth_profile_item, context_type):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "access_token": unsigned_token(int(time.time()) + 3600),
+        "issuer": "https://auth.lightnow.local/realms/lightnow-local", "client_id": "lightnow-cli",
+        "context_type": context_type, **({"context_tenant": "tenant-uuid"} if context_type == "tenant" else {}),
+    }))
+    client = RegistryApiClient(RegistryApiConfig(
+        enabled=True, base_url="https://registry-api.lightnow.local/v0.1", use_cli_session=True,
+        cli_config_path=str(config_path)), RuntimeSecretResolver(RuntimeSecretsConfig()))
+    item = custom_oauth_profile_item
+    with respx.mock(assert_all_called=True) as router:
+        profile = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200, json={"servers": [item]})
+        vault = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/custom/access", params={"version": 3}).respond(
+            200, json={"data": {"data": {"value": "Bearer synthetic-custom-access",
+                "_lightnow_operation_id": item["external_secret_bindings"][0]["locator"]["operation_id"]},
+                "metadata": {"version": 3, "destroyed": False, "deletion_time": ""}}})
+        result = await client.fetch_profile("default", None)
+    assert len(profile.calls) == len(vault.calls) == 1
+    assert profile.calls[0].request.headers.get("X-Tenant") == ("tenant-uuid" if context_type == "tenant" else None)
+    assert len(result.upstreams) == 1
+    upstream = result.upstreams[0]
+    assert upstream.name == "own-oauth-custom" and upstream.server_name == "custom:own-oauth-custom"
+    assert str(upstream.config.url) == "https://canonical.example.test/mcp"
+    assert upstream.config.headers == {"X-Profile": "default", "Authorization": "Bearer synthetic-custom-access"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_type", ["personal", "tenant"])
+@pytest.mark.parametrize("refusal", ["missing-resolver", "acl", "version", "transport"])
+async def test_custom_profile_fetch_fails_closed_when_oauth_header_cannot_be_resolved(
+    tmp_path, custom_oauth_profile_item, context_type, refusal,
+):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "access_token": unsigned_token(int(time.time()) + 3600),
+        "issuer": "https://auth.lightnow.local/realms/lightnow-local", "client_id": "lightnow-cli",
+        "context_type": context_type, **({"context_tenant": "tenant-uuid"} if context_type == "tenant" else {}),
+    }))
+    client = RegistryApiClient(RegistryApiConfig(
+        enabled=True, base_url="https://registry-api.lightnow.local/v0.1", use_cli_session=True,
+        cli_config_path=str(config_path)), None if refusal == "missing-resolver" else RuntimeSecretResolver(RuntimeSecretsConfig()))
+    item = custom_oauth_profile_item
+    if refusal == "transport":
+        item["context"]["probe_request"] = {"transport": "stdio", "stdio": {"cmd": "wrong-transport"}}
+    error = RegistryApiError if refusal in {"missing-resolver", "transport"} else RuntimeSecretError
+    with respx.mock(assert_all_called=False) as router:
+        profile = router.get("https://registry-api.lightnow.local/v0.1/integrations/profiles/default/servers").respond(
+            200, json={"servers": [item]})
+        vault = router.get("http://127.0.0.1:8200/v1/secret/data/lightnow/custom/access", params={"version": 3}).respond(
+            403 if refusal == "acl" else 200, json={"data": {"data": {"value": "Bearer forbidden-fallback",
+                "_lightnow_operation_id": item["external_secret_bindings"][0]["locator"]["operation_id"]},
+                "metadata": {"version": 4, "destroyed": False, "deletion_time": ""}}})
+        with pytest.raises(error):
+            await client.fetch_profile("default", None)
+    assert len(profile.calls) == 1
+    assert len(vault.calls) == (0 if refusal in {"missing-resolver", "transport"} else 1)

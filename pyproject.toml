@@ -1,6 +1,6 @@
 [project]
 name = "lightnow-proxy"
-version = "1.11.0"
+version = "1.12.0"
 description = "LightNow Local Proxy for centrally managed MCP client configuration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +32,7 @@ dependencies = [
   "pyyaml>=6.0.2",
   "structlog>=24.4.0",
   "uvicorn[standard]>=0.32.0",
+  "authlib>=1.9.4,<2",
 ]
 
 [project.optional-dependencies]

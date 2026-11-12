@@ -62,6 +62,8 @@ def main() -> None:
         action="store_true",
         help="Print machine-readable JSON for --health.",
     )
+    parser.add_argument("--secret-store-worker", action="store_true",
+                        help="Run only the opt-in outbound organization Secret Store worker; no MCP/HTTP listener.")
     args = parser.parse_args()
 
     config_path = args.config
@@ -73,6 +75,13 @@ def main() -> None:
             "(run `lightnow sync --client <client> --local-proxy` first, "
             "or set --config/LIGHTNOW_PROXY_CONFIG)"
         )
+    if args.secret_store_worker:
+        if not config.runtime_secrets.worker_enabled or not config.runtime_secrets.connector_id:
+            parser.error("--secret-store-worker requires an enabled organization connector worker")
+        anyio.run(run_secret_store_worker, config)
+        return
+    if config.runtime_secrets.worker_enabled and config.runtime_secrets.connector_id:
+        parser.error("Organization connectors require --secret-store-worker")
     if args.health:
         report = anyio.run(build_and_emit_health_report, config)
         if args.json:
@@ -91,19 +100,32 @@ def main() -> None:
     uvicorn.run(app, host=config.server.host, port=config.server.port)
 
 
+async def run_secret_store_worker(config: ProxyConfig) -> None:
+    router = ToolRouter(config)
+    if router._secret_worker is None:
+        raise RuntimeError("Secret Store worker is not configured")
+    await router._secret_worker.run_connector()
+
+
 async def build_and_emit_health_report(config: ProxyConfig) -> dict:
     router = ToolRouter(config)
-    report = await build_health_report(config, router=router)
-    await router.emit_health_event(report)
-    return report
+    try:
+        report = await build_health_report(config, router=router)
+        await router.emit_health_event(report)
+        return report
+    finally:
+        await router.close_runtime_events()
 
 
 async def warm_tools_cache(config: ProxyConfig) -> None:
     if not config.local_proxy.enabled:
         raise RuntimeError("tools cache warming requires local_proxy.enabled=true")
     router = ToolRouter(config)
-    tools = await router.list_tools(config.local_proxy.profile)
-    print(f"Warmed tools cache for profile {config.local_proxy.profile}: {len(tools)} tools")
+    try:
+        tools = await router.list_tools(config.local_proxy.profile)
+        print(f"Warmed tools cache for profile {config.local_proxy.profile}: {len(tools)} tools")
+    finally:
+        await router.close_runtime_events()
 
 
 async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config_path: str = "") -> None:
@@ -137,16 +159,20 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
                 task_group.start_soon(router.run_device_heartbeat_loop)
             if router.managed_events_enabled():
                 task_group.start_soon(router.run_managed_event_loop)
-            await router.emit_lifecycle_event("runner_started")
             try:
+                await router.emit_lifecycle_event("runner_started")
                 await server.run(
                     captured_read_stream,
                     write_stream,
                     server.create_initialization_options(),
                 )
             finally:
-                await router.emit_lifecycle_event("runner_stopped")
                 task_group.cancel_scope.cancel()
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await router.emit_lifecycle_event("runner_stopped")
+                    finally:
+                        await router.close_runtime_events()
 
 
 if __name__ == "__main__":

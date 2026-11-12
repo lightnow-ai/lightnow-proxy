@@ -323,6 +323,7 @@ async def test_unresolved_managed_attempt_never_captures_arguments_or_raw_errors
         api.post(REGISTRY + "/integrations/runtime-events").mock(side_effect=legacy_event)
         with pytest.raises(httpx.HTTPStatusError):
             await router.call_tool("default", managed.tool_namespace + "__read", {"value": "private request"})
+        await router.flush_runtime_events()
     assert len(optional) == 1
     assert optional[0].get("arguments") is None and optional[0]["arguments_captured"] is False
     assert optional[0].get("error_message") is None

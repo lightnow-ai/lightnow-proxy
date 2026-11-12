@@ -291,7 +291,7 @@ async def test_managed_profile_filters_actual_inventory_and_denies_before_single
                 return httpx.Response(403)
             item = {"alias": "docs", "connection_id": CONNECTION, "assignment_id": ASSIGNMENT, "status": "managed_runtime_required"}
             if request.url.params.get("include") == "secrets":
-                assert request.headers["X-LightNow-Runtime-Capabilities"] == "managed-connections.v1"
+                assert request.headers["X-LightNow-Runtime-Capabilities"] == "managed-connections.v1,secret-store.versioned-read.v1"
                 assert request.headers["X-LightNow-Runtime-Client"] == CLIENT
                 context = managed_context()
                 contexts.append(context)
@@ -421,7 +421,7 @@ async def test_native_heartbeat_negotiates_owned_client_without_optional_telemet
         response = api.post(REGISTRY + f"/integrations/devices/{local.device_installation_id}/clients/{local.client_instance_id}/heartbeat").respond(
             200, json={"device": {"clients": [{"id": CLIENT, "client_instance_id": str(local.client_instance_id)}]}})
         assert await router.send_device_heartbeat()
-        assert json.loads(response.calls.last.request.content)["client"]["managed_capabilities"] == ["managed-connections.v1"]
+        assert json.loads(response.calls.last.request.content)["client"]["managed_capabilities"] == ["managed-connections.v1", "secret-store.versioned-read.v1"]
         assert response.calls.last.request.headers["Authorization"].startswith("Bearer ")
         assert router.registry_client.runtime_client_id == CLIENT
 
@@ -523,11 +523,12 @@ async def test_managed_names_stay_bound_to_assignment_through_alias_collision_re
                 assert not (await router.call_tool("default", first_wire, {"value": "renamed"})).is_error
                 assert first_calls() == ["_read", "_read"]
                 assert second_calls() == []
-                # A replacement between metadata and context delivery is also rejected.
+                # A replacement found through a lookup hint cannot inherit the
+                # old UUID; full fresh metadata confirms its removal.
                 pending_replacement = str(uuid4())
                 with pytest.raises(Exception) as replaced:
                     await router.call_tool("default", first_wire, {"value": "rebound"})
-                assert str(unwrap_error(replaced.value)) == "MANAGED_CONTEXT_MISMATCH"
+                assert str(unwrap_error(replaced.value)) == "MANAGED_ASSIGNMENT_UNAVAILABLE"
                 required = False
                 # Even an exact local override cannot inherit the detached name.
                 router.config.upstreams[TOOL_PREFIX] = UpstreamConfig(**{**second_config,
