@@ -136,7 +136,7 @@ is best effort, so a missing event does not establish whether a tool ran.
 
 See [Inspect runtime events](https://docs.lightnow.ai/how-to/inspect-runtime-events)
 for the available views and capture settings, and
-[Architecture](docs/ARCHITECTURE.md) for the request and data flows.
+[Architecture](https://github.com/lightnow-ai/lightnow-proxy/blob/main/docs/ARCHITECTURE.md) for the request and data flows.
 
 ## Troubleshooting
 
@@ -174,8 +174,8 @@ uv run --locked --extra dev pytest -q
 ```
 
 See the [contribution guidelines](https://github.com/lightnow-ai/.github/blob/main/CONTRIBUTING.md)
-and [release guide](docs/release.md).
+and [release guide](https://github.com/lightnow-ai/lightnow-proxy/blob/main/docs/release.md).
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](https://github.com/lightnow-ai/lightnow-proxy/blob/main/LICENSE).
