@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.2](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.1...v1.12.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **docs:** keep documentation links usable on PyPI ([#92](https://github.com/lightnow-ai/lightnow-proxy/issues/92)) ([c4abe38](https://github.com/lightnow-ai/lightnow-proxy/commit/c4abe3828b623ce80ee8df7a839bbc0ae05834f2))
+
 ## [1.12.1](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.0...v1.12.1) (2026-11-12)
 
 
