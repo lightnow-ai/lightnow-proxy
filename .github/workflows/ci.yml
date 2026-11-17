@@ -50,7 +50,7 @@ jobs:
         run: uv run --extra dev ruff check src tests examples
 
       - name: Test
-        run: uv run --extra dev pytest -q -p ci.pytest_inventory --junitxml=test-reports/junit.xml -o junit_family=xunit1 --alluredir=test-reports/allure-results
+        run: uv run --extra dev python -m pytest -q -p ci.pytest_inventory --junitxml=test-reports/junit.xml -o junit_family=xunit1 --alluredir=test-reports/allure-results
 
       - name: Verify complete native testcase inventory
         if: always()
