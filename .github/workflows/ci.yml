@@ -9,16 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  risk:
+    name: Classify compatibility risk
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.profile.outputs.matrix }}
+      risk: ${{ steps.profile.outputs.risk }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - id: profile
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: python ci/risk_profile.py "$BASE_SHA" "$HEAD_SHA" "$EVENT_NAME" >> "$GITHUB_OUTPUT"
+
   test:
     name: Python ${{ matrix.python-version }}
+    needs: risk
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
-          - "3.13"
+      matrix: ${{ fromJSON(needs.risk.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -36,7 +50,45 @@ jobs:
         run: uv run --extra dev ruff check src tests examples
 
       - name: Test
-        run: uv run --extra dev pytest -q
+        run: uv run --extra dev python -m pytest -q -p ci.pytest_inventory --junitxml=test-reports/junit.xml -o junit_family=xunit1 --alluredir=test-reports/allure-results
+
+      - name: Verify complete native testcase inventory
+        if: always()
+        run: python ci/verify_test_inventory.py
+
+      - name: Set up Allure runtime
+        if: always()
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
+      - name: Verify release lineage selection
+        if: always()
+        run: node --test ci/test-release-reuse.cjs
+
+      - name: Native Allure quality gate
+        if: always()
+        run: npx --yes allure@3.33.0 generate test-reports/allure-results --config ci/allurerc.mjs
+
+      - name: Pack original native results
+        if: always()
+        run: |
+          npx --yes allure@3.33.0 results pack test-reports/allure-results --name test-reports/allure-results.zip
+          if [ -d test-reports/allure-report ]; then
+            python -m zipfile -c test-reports/allure-report.zip test-reports/allure-report
+          fi
+
+      - name: Upload compressed native test report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: source-tests-python-${{ matrix.python-version }}
+          compression-level: 0
+          path: |
+            test-reports/*.zip
+            test-reports/junit.xml
+            test-reports/planned-pytest.json
+          if-no-files-found: error
 
   package:
     name: Package
