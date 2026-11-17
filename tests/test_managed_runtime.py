@@ -423,9 +423,20 @@ async def test_native_heartbeat_negotiates_owned_client_without_optional_telemet
         response = api.post(REGISTRY + f"/integrations/devices/{local.device_installation_id}/clients/{local.client_instance_id}/heartbeat").respond(
             200, json={"device": {"clients": [{"id": CLIENT, "client_instance_id": str(local.client_instance_id)}]}})
         assert await router.send_device_heartbeat()
-        assert json.loads(response.calls.last.request.content)["client"]["managed_capabilities"] == ["managed-connections.v1", "secret-store.versioned-read.v1"]
+        payload = json.loads(response.calls.last.request.content)
+        assert payload["client"]["managed_capabilities"] == ["managed-connections.v1", "secret-store.versioned-read.v1"]
         assert response.calls.last.request.headers["Authorization"].startswith("Bearer ")
         assert router.registry_client.runtime_client_id == CLIENT
+        session = UUID(payload["presence_session_id"])
+        assert session.version == 4
+        disconnect = api.delete(
+            REGISTRY + f"/integrations/devices/{local.device_installation_id}/clients/{local.client_instance_id}/presence/{session}"
+        ).respond(204)
+        await router.close_device_presence()
+        await router.close_device_presence()
+        assert not await router.send_device_heartbeat()
+        assert disconnect.call_count == 1
+        assert disconnect.calls.last.request.headers["Authorization"] == response.calls.last.request.headers["Authorization"]
 
 
 @pytest.mark.asyncio

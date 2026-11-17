@@ -364,13 +364,17 @@ def create_app(
                 # final event and drain, including when startup fails halfway.
                 with anyio.CancelScope(shield=True):
                     try:
-                        if hasattr(router, "close_managed_events"):
-                            await router.close_managed_events()
-                        if runtime_started:
-                            await emit_lifecycle_event(router, "runner_stopped")
+                        if hasattr(router, "close_device_presence"):
+                            await router.close_device_presence()
                     finally:
-                        if hasattr(router, "close_runtime_events"):
-                            await router.close_runtime_events()
+                        try:
+                            if hasattr(router, "close_managed_events"):
+                                await router.close_managed_events()
+                            if runtime_started:
+                                await emit_lifecycle_event(router, "runner_stopped")
+                        finally:
+                            if hasattr(router, "close_runtime_events"):
+                                await router.close_runtime_events()
 
             stack.push_async_callback(finish_runtime)
             if local_proxy_app is not None:

@@ -174,10 +174,13 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
             # race the final delivery or retain its upload lock during shutdown.
             with anyio.CancelScope(shield=True):
                 try:
-                    await router.close_managed_events()
-                    await router.emit_lifecycle_event("runner_stopped")
+                    await router.close_device_presence()
                 finally:
-                    await router.close_runtime_events()
+                    try:
+                        await router.close_managed_events()
+                        await router.emit_lifecycle_event("runner_stopped")
+                    finally:
+                        await router.close_runtime_events()
 
 
 if __name__ == "__main__":
