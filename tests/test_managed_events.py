@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from uuid import uuid4
 
 import httpx
@@ -311,6 +312,64 @@ async def test_stdio_eof_flushes_required_facts_after_joining_the_background_upl
                 await asyncio.gather(serving, return_exceptions=True)
     assert delivered == expected
     assert box.status()["pending"] == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGTERM")
+def test_stdio_sigterm_releases_the_live_presence_with_stdin_open(tmp_path):
+    child = r"""
+import anyio, json, respx, sys
+from pathlib import Path
+from uuid import uuid4
+sys.path.insert(0, sys.argv[1])
+from test_managed_runtime import REGISTRY, managed_router
+from lightnow_proxy import main
+
+root = Path(sys.argv[2])
+router = managed_router(root)
+local = router.config.local_proxy
+local.device_installation_id = uuid4()
+local.client_instance_id = uuid4()
+local.device_hostname = 'shutdown-test'
+main.ToolRouter = lambda config: router
+endpoint = f'{REGISTRY}/integrations/devices/{local.device_installation_id}/clients/{local.client_instance_id}'
+
+def heartbeat(request):
+    receipt = json.loads(request.content)['presence_session_id']
+    request_token = request.headers['Authorization']
+    api.delete(f'{endpoint}/presence/{receipt}').mock(side_effect=lambda delete: release(delete, request_token))
+    return respx.MockResponse(200, json={'device': {'clients': []}})
+
+def release(request, token):
+    assert request.headers['Authorization'] == token
+    with (root / 'released').open('x') as output:
+        output.write('released')
+    return respx.MockResponse(204)
+
+send = router.send_device_heartbeat
+async def ready_heartbeat():
+    result = await send()
+    if result:
+        (root / 'ready').touch()
+    return result
+
+router.send_device_heartbeat = ready_heartbeat
+with respx.mock(assert_all_called=False) as api:
+    api.post(endpoint + '/heartbeat').mock(side_effect=heartbeat)
+    anyio.run(lambda: main.run_stdio(router.config, handle_sigterm=True))
+"""
+    with subprocess.Popen([sys.executable, "-c", child, str(Path(__file__).parent), str(tmp_path)],
+                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as process:
+        try:
+            deadline = monotonic() + 10
+            while not (tmp_path / "ready").is_file() and process.poll() is None and monotonic() < deadline:
+                sleep(0.02)
+            assert (tmp_path / "ready").is_file(), "stdio Proxy heartbeat did not complete"
+            process.send_signal(signal.SIGTERM)
+            assert process.wait(timeout=10) == -signal.SIGTERM
+            assert (tmp_path / "released").read_text() == "released"
+        finally:
+            if process.poll() is None:
+                process.kill()
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import anyio
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
+import signal
 
 from mcp.server.stdio import stdio_server
 import uvicorn
@@ -93,7 +95,7 @@ def main() -> None:
         anyio.run(warm_tools_cache, config)
         return
     if args.transport == "stdio":
-        anyio.run(run_stdio, config, args.capture_path, config_path)
+        anyio.run(run_stdio, config, args.capture_path, config_path, os.name == "posix")
         return
 
     app = create_app(config)
@@ -128,12 +130,22 @@ async def warm_tools_cache(config: ProxyConfig) -> None:
         await router.close_runtime_events()
 
 
-async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config_path: str = "") -> None:
+async def run_stdio(
+    config: ProxyConfig, capture_path: str | None = None, config_path: str = "", handle_sigterm: bool = False
+) -> None:
     if not config.local_proxy.enabled:
         raise RuntimeError("stdio transport requires local_proxy.enabled=true")
 
     router = ToolRouter(config)
     server = LocalProxyMCPApp(config, router).server
+    terminating = False
+
+    async def receive_termination(signals, cancel_scope: anyio.CancelScope) -> None:
+        nonlocal terminating
+        async for _ in signals:
+            terminating = True
+            cancel_scope.cancel()
+            return
 
     def observe_client_context(session_message) -> None:
         context = initialize_client_context(session_message)
@@ -154,33 +166,38 @@ async def run_stdio(config: ProxyConfig, capture_path: str | None = None, config
             observe_client_context,
         )
         try:
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(forward_messages)
-                if router.device_heartbeat_enabled():
-                    task_group.start_soon(router.run_device_heartbeat_loop)
-                if router.managed_events_enabled():
-                    task_group.start_soon(router.run_managed_event_loop)
+            with anyio.open_signal_receiver(signal.SIGTERM) if handle_sigterm else nullcontext() as signals:
                 try:
-                    await router.emit_lifecycle_event("runner_started")
-                    await server.run(
-                        captured_read_stream,
-                        write_stream,
-                        server.create_initialization_options(),
-                    )
+                    async with anyio.create_task_group() as task_group:
+                        if signals is not None:
+                            task_group.start_soon(receive_termination, signals, task_group.cancel_scope)
+                        task_group.start_soon(forward_messages)
+                        if router.device_heartbeat_enabled():
+                            task_group.start_soon(router.run_device_heartbeat_loop)
+                        if router.managed_events_enabled():
+                            task_group.start_soon(router.run_managed_event_loop)
+                        try:
+                            await router.emit_lifecycle_event("runner_started")
+                            await server.run(captured_read_stream, write_stream, server.create_initialization_options())
+                        finally:
+                            task_group.cancel_scope.cancel()
                 finally:
-                    task_group.cancel_scope.cancel()
+                    # Join the heartbeat and uploader before releasing presence
+                    # and draining the final audit events.
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            await router.close_device_presence()
+                        finally:
+                            try:
+                                await router.close_managed_events()
+                                await router.emit_lifecycle_event("runner_stopped")
+                            finally:
+                                await router.close_runtime_events()
         finally:
-            # Leaving the group first joins the cancelled uploader, so it cannot
-            # race the final delivery or retain its upload lock during shutdown.
-            with anyio.CancelScope(shield=True):
-                try:
-                    await router.close_device_presence()
-                finally:
-                    try:
-                        await router.close_managed_events()
-                        await router.emit_lifecycle_event("runner_stopped")
-                    finally:
-                        await router.close_runtime_events()
+            if terminating:
+                # Preserve normal signal exit even if the peer keeps stdin open.
+                # The product shutdown above has already completed.
+                signal.raise_signal(signal.SIGTERM)
 
 
 if __name__ == "__main__":
