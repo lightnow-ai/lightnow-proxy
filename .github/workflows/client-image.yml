@@ -30,7 +30,7 @@ jobs:
       queue: max
     steps:
       - name: Verify source, publish image and record digest
-        uses: lightnow-ai/.github/actions/client-image@410d43d2f6034d68a56becc13d2c3108327e8f87
+        uses: lightnow-ai/.github/actions/client-image@804cecefce16ef4a7b1e02ad4cbd32fcc689be95
         with:
           source-run: ${{ inputs.source_run || github.event.workflow_run.id }}
           token: ${{ github.token }}
