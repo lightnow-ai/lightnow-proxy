@@ -29,3 +29,16 @@ Proxy Jenkins separately builds its actual runtime Docker image and executes
 its installed entry point smoke. Source pytest belongs to Actions; it previously
 copied source into the runtime image and installed a separate dev environment,
 so that duplicate suite did not validate the installed image distribution.
+
+## FeatureStack product image
+
+After successful product CI or a release, the image publisher consumes the original
+`python-distributions` artifact. Internal PRs and releases each retain their wheel
+provenance. An identical wheel reuses its existing runtime image, including its
+resolved dependencies. A manual run accepts the ID of a successful retained source
+run for backfill.
+
+The `client-product-image` receipt in the publication run records the wheel hash,
+the dependency checksum inventory and the immutable `ghcr.io/lightnow-ai/lightnow-proxy@sha256:…`
+reference for Linux AMD64. FeatureStacks select this product independently. The
+`wheel-<sha256>` tag is used to discover the digest.

@@ -1,0 +1,36 @@
+name: Publish product image
+on:
+  workflow_run:
+    workflows: [CI, Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful CI or release run with retained python-distributions
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    concurrency:
+      group: product-image-publication
+      queue: max
+    steps:
+      - name: Verify source, publish image and record digest
+        uses: lightnow-ai/.github/actions/client-image@804cecefce16ef4a7b1e02ad4cbd32fcc689be95
+        with:
+          source-run: ${{ inputs.source_run || github.event.workflow_run.id }}
+          token: ${{ github.token }}
