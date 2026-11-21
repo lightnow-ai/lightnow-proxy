@@ -720,6 +720,18 @@ class RegistryApiClient:
             raise RegistryApiError("Registry device heartbeat response must be a JSON object")
         return result
 
+    async def disconnect_device_presence(
+        self, installation_id: str, client_instance_id: str, session_id: str
+    ) -> None:
+        headers = await self._authorization_headers()
+        url = self._api_url(
+            f"/integrations/devices/{installation_id}/clients/{client_instance_id}/presence/{session_id}"
+        )
+        async with self._http_client() as client:
+            response = await client.delete(url, headers=headers)
+            if response.status_code != 404:  # Older registries use expiry only.
+                response.raise_for_status()
+
     async def _fetch_profile_servers(
         self, profile_name: str, include_secrets: bool, *, alias: str | None = None,
     ) -> dict[str, Any]:

@@ -12,7 +12,7 @@ import re
 from time import monotonic, time
 from typing import Any, Mapping
 from urllib.parse import quote, unquote
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -137,6 +137,8 @@ class ToolRouter:
         self._secret_worker = SecretStoreWorker(config, self.registry_client) if config.runtime_secrets.worker_enabled and self.registry_client else None
         self._secret_worker_task: asyncio.Task[None] | None = None
         self.client_context = ClientRuntimeContext()
+        self._presence_session_id = str(uuid4())
+        self._presence_closed = False
         self.device_heartbeat_last_attempt_at: datetime | None = None
         self.device_heartbeat_last_success_at: datetime | None = None
         self.device_heartbeat_last_error: str | None = None
@@ -1018,7 +1020,7 @@ class ToolRouter:
 
     async def send_device_heartbeat(self) -> bool:
         """Send one best-effort heartbeat without affecting MCP traffic."""
-        if not self.device_heartbeat_enabled() or self.registry_client is None:
+        if self._presence_closed or not self.device_heartbeat_enabled() or self.registry_client is None:
             return False
         local_proxy = self.config.local_proxy
         if self._secret_worker is not None and not await self._secret_worker.prepare():
@@ -1028,6 +1030,7 @@ class ToolRouter:
         device_versions, runner_versions = heartbeat_version_fields(local_proxy)
         applications = self._pending_managed_applications() if local_proxy.sync_from_lightnow else {}
         payload = {
+            "presence_session_id": self._presence_session_id,
             "device": {
                 "reported_hostname": local_proxy.device_hostname,
                 "platform": local_proxy.device_platform,
@@ -1071,6 +1074,25 @@ class ToolRouter:
         self.device_heartbeat_last_success_at = datetime.now(UTC)
         self.device_heartbeat_last_error = None
         return True
+
+    async def close_device_presence(self) -> None:
+        """Release this process's presence after the heartbeat producer has joined."""
+        if self._presence_closed:
+            return
+        self._presence_closed = True
+        if self.device_heartbeat_last_success_at is None or self.registry_client is None:
+            return
+
+        local = self.config.local_proxy
+        try:
+            async with asyncio.timeout(3):
+                await self.registry_client.disconnect_device_presence(
+                    str(local.device_installation_id), str(local.client_instance_id), self._presence_session_id
+                )
+        except Exception:
+            # The registry's ordinary heartbeat expiry still covers failures
+            # and deployments with an older registry.
+            logger.warning("LightNow device presence could not be released during shutdown")
 
     async def run_device_heartbeat_loop(self) -> None:
         """Send immediately, then let each regular interval serve as the only retry."""
