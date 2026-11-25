@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.4](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.3...v1.12.4) (2026-11-25)
+
+
+### Bug Fixes
+
+* **ci:** load inventory plugin through Python module runner ([22fe434](https://github.com/lightnow-ai/lightnow-proxy/commit/22fe434364849b741ef11a13c7de9eca55d159cc))
+
 ## [1.12.3](https://github.com/lightnow-ai/lightnow-proxy/compare/v1.12.2...v1.12.3) (2026-11-12)
 
 
